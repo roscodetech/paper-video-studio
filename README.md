@@ -21,7 +21,7 @@ Then the existing `paper-video` skill renders an MP4 (1920x1080, narrated via ed
 rm -rf ~/.claude/skills/paper-video
 
 # Add the plugin:
-claude plugin add github.com/roscoekerby/paper-video-studio
+claude plugin add github.com/roscodetech/paper-video-studio
 ```
 
 Local development install:
