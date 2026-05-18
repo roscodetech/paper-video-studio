@@ -424,8 +424,19 @@ class PaperVideoEditor:
             pass
         self.root.after(150, self._drain_render_queue)
 
+    def _on_close(self) -> None:
+        if self.dirty:
+            answer = messagebox.askyesnocancel("Unsaved changes", "Save before closing?")
+            if answer is None:
+                return
+            if answer:
+                self._on_save()
+        self.root.destroy()
+
     def run(self) -> None:
         self._populate_page_selector()
+        self.vm.prune(max_auto=50, max_age_days=30)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.mainloop()
 
 
