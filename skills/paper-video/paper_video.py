@@ -47,7 +47,7 @@ TITLE_CARD_SEC = 4.0
 END_CARD_SEC = 3.0
 MIN_POINT_SEC = 5.0
 WORDS_PER_SECOND = 2.6
-PAN_PORTION = 0.45  # first 45% of clip is the pan, then hold
+PAN_DURATION_S = 1.1  # pan + simultaneous highlight reveal, fixed regardless of clip length
 
 DEFAULT_VOICE = "en-US-AriaNeural"
 
@@ -635,14 +635,15 @@ HL_OUTLINE = (255, 193, 7, 230)
 
 def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
                    out_path: Path, duration: float):
-    """Three stages:
-      1) Pan: camera moves from full page → highlight closeup. No highlight visible.
-      2) Animate: camera holds at closeup. Highlight grows left-to-right like a marker.
-      3) Hold: camera holds, full highlight visible. Single PNG looped.
+    """Two stages:
+      1) Pan + simultaneous smooth reveal (fixed ~1.1s): camera zooms toward the
+         highlight closeup while the yellow highlight wipes in left-to-right at
+         a pixel-smooth rate. Reveal ends word-aligned because the underlying
+         bboxes are word-bridged. Narration and highlight start together.
+      2) Hold: full highlight, single looped PNG.
 
-    Pan + Animate share one ffmpeg encode (raw RGB pipe). Hold is a separate static
-    encode. Then the two MP4s are concatenated with -c copy (safe — same encoder
-    params on both)."""
+    Pan shares one ffmpeg encode (raw RGB pipe). Hold is a separate static encode.
+    The two are concatenated with -c copy."""
     from PIL import Image, ImageDraw
 
     pw, ph = page_img.size
@@ -676,13 +677,10 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
     sxc, syc = pw / 2, ph / 2
     exc, eyc = (ux0 + ux1) / 2, (uy0 + uy1) / 2
 
-    # Stage durations
-    pan_dur = min(2.0, max(1.4, duration * 0.18))
-    anim_dur = min(1.4, max(0.6, duration * 0.12))
-    hold_dur = max(0.4, duration - pan_dur - anim_dur)
-
+    # Stage durations: fixed-length pan/reveal, then long hold while narration plays.
+    pan_dur = min(PAN_DURATION_S, duration * 0.4)
+    hold_dur = max(0.4, duration - pan_dur)
     pan_frames = max(2, int(pan_dur * FPS))
-    anim_frames = max(2, int(anim_dur * FPS))
 
     def _view_at(te):
         """Return (PIL.Image, cx0, cy0, zoom)."""
@@ -700,20 +698,8 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
             crop = crop.convert("RGB")
         return crop.resize((VIDEO_W, VIDEO_H), Image.LANCZOS), cx0, cy0, zoom
 
-    # End-zoom view = base for animate + hold
+    # End-zoom view = base for hold
     end_view, end_cx0, end_cy0, end_z = _view_at(1.0)
-
-    # Highlight bboxes mapped into the viewport (1920x1080)
-    hl_view = []
-    for x0, y0, x1, y1 in hl_page:
-        hl_view.append((
-            int((x0 - end_cx0) * end_z),
-            int((y0 - end_cy0) * end_z),
-            int((x1 - end_cx0) * end_z),
-            int((y1 - end_cy0) * end_z),
-        ))
-    widths = [b[2] - b[0] for b in hl_view]
-    total_w = sum(widths) or 1
 
     def _group_visible_by_line(visible_bboxes):
         """Group bboxes that share approximately the same vertical band."""
@@ -734,27 +720,45 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
                 lines.append({"y0": y0, "y1": y1, "bboxes": [bb]})
         return lines
 
-    def _draw_highlight(base_img, progress):
-        """Composite a partial highlight (0..1) on top of base_img.
+    def _bboxes_in_view(cx0, cy0, zoom):
+        """Map the page-pixel bboxes into viewport coords for this camera frame."""
+        return [
+            (
+                int((x0 - cx0) * zoom),
+                int((y0 - cy0) * zoom),
+                int((x1 - cx0) * zoom),
+                int((y1 - cy0) * zoom),
+            )
+            for x0, y0, x1, y1 in hl_page
+        ]
 
-        Reveals whole words at a time — never cuts mid-word. The semi-transparent
-        fill is drawn per-word so the reveal grows left-to-right; the amber
-        outline is drawn once per visible line so there are no vertical strokes
-        between adjacent words."""
+    def _draw_partial_highlight(base_img, bboxes_in_view, progress):
+        """Composite a smooth pixel-progressive highlight at the given progress
+        (0..1) on top of base_img. Within each line the fill grows continuously
+        left-to-right; the amber outline is drawn once per partially-visible line.
+
+        At progress=1.0 the entire word-bridged region is filled, so the held
+        end-frame is always word-aligned."""
         overlay = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
+        if not bboxes_in_view or progress <= 0.0:
+            return base_img.convert("RGB")
         od = ImageDraw.Draw(overlay)
-        n = len(hl_view)
-        if n == 0:
-            return base_img.convert("RGB")
-        shown = max(0, min(n, int(round(progress * n))))
-        if shown == 0:
-            return base_img.convert("RGB")
+        widths = [max(0, b[2] - b[0]) for b in bboxes_in_view]
+        total_w = sum(widths) or 1
+        target = total_w * min(1.0, max(0.0, progress))
+        cum = 0
+        partial_rects = []
+        for (x0, y0, x1, y1), w in zip(bboxes_in_view, widths):
+            if cum >= target:
+                break
+            rem = target - cum
+            px1 = x0 + min(int(round(rem)), w)
+            if px1 > x0:
+                od.rectangle([x0, y0, px1, y1], fill=HL_FILL)
+                partial_rects.append([x0, y0, px1, y1])
+            cum += w
 
-        visible = hl_view[:shown]
-        for x0, y0, x1, y1 in visible:
-            od.rectangle([x0, y0, x1, y1], fill=HL_FILL)
-
-        for line in _group_visible_by_line(visible):
+        for line in _group_visible_by_line(partial_rects):
             gxs0 = min(b[0] for b in line["bboxes"])
             gys0 = min(b[1] for b in line["bboxes"])
             gxs1 = max(b[2] for b in line["bboxes"])
@@ -769,7 +773,7 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
     hold_png = tmpdir / (out_path.stem + "_hold.png")
     stderr_log = tmpdir / (out_path.stem + "_stderr.log")
 
-    # --- Pan + Animate stages: single rawvideo pipe ---
+    # --- Pan + reveal: single rawvideo pipe ---
     stderr_fh = open(stderr_log, "wb")
     proc = subprocess.Popen(
         ["ffmpeg", "-y", "-loglevel", "error",
@@ -782,24 +786,23 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=stderr_fh,
     )
     try:
-        # 1) Pan — no highlight
+        last_idx = max(1, pan_frames - 1)
         for fi in range(pan_frames):
-            te = _ease_in_out(fi / max(1, pan_frames - 1))
-            frame, _, _, _ = _view_at(te)
-            proc.stdin.write(frame.tobytes())
-
-        # 2) Animate — highlight grows L→R on the held end-view
-        for fi in range(anim_frames):
-            p = (fi + 1) / anim_frames
-            frame = _draw_highlight(end_view, p)
-            proc.stdin.write(frame.tobytes())
+            te = _ease_in_out(fi / last_idx)
+            frame, cx0, cy0, zoom = _view_at(te)
+            bb_view = _bboxes_in_view(cx0, cy0, zoom)
+            # Reveal slightly ahead of camera so it feels "led" by the highlight,
+            # but settles to fully revealed exactly at the end of the pan.
+            reveal_p = min(1.0, (fi + 1) / last_idx * 1.05)
+            frame_hl = _draw_partial_highlight(frame, bb_view, reveal_p)
+            proc.stdin.write(frame_hl.tobytes())
 
         proc.stdin.close()
         rc = proc.wait(timeout=240)
         stderr_fh.close()
         if rc != 0:
             tail = stderr_log.read_text(encoding="utf-8", errors="ignore").splitlines()[-15:]
-            raise RuntimeError("ffmpeg pan/anim stage failed:\n" + "\n".join(tail))
+            raise RuntimeError("ffmpeg pan stage failed:\n" + "\n".join(tail))
     except Exception:
         try:
             proc.kill()
@@ -812,8 +815,8 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
     finally:
         stderr_log.unlink(missing_ok=True)
 
-    # --- 3) Hold: full highlight, looped PNG ---
-    full_hold = _draw_highlight(end_view, 1.0)
+    # --- Hold: full highlight on the end-view, looped PNG ---
+    full_hold = _draw_partial_highlight(end_view, _bboxes_in_view(end_cx0, end_cy0, end_z), 1.0)
     full_hold.save(hold_png)
     _run_ffmpeg([
         "ffmpeg", "-y", "-loop", "1", "-i", str(hold_png),
