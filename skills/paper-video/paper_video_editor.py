@@ -67,6 +67,27 @@ class VersionManager:
         auto = sorted(self.history_dir.glob("auto-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         return [{"filename": p.name, "mtime": p.stat().st_mtime} for p in (named + auto)]
 
+    def prune(self, max_auto: int = 50, max_age_days: int = 30) -> int:
+        """Remove auto snapshots older than max_age_days OR beyond max_auto newest. Never touch named.
+
+        Returns the number of files deleted."""
+        if not self.history_dir.exists():
+            return 0
+        auto_files = sorted(
+            self.history_dir.glob("auto-*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        cutoff = datetime.now().timestamp() - max_age_days * 86400
+        deleted = 0
+        for idx, path in enumerate(auto_files):
+            too_old = path.stat().st_mtime < cutoff
+            too_many = idx >= max_auto
+            if too_old or too_many:
+                path.unlink()
+                deleted += 1
+        return deleted
+
 
 def naive_defaults(pages: List[Dict[str, Any]], max_points: int = 5) -> List[Dict[str, str]]:
     """Generate naive point defaults: longest distinctive sentence per page, capped at max_points."""

@@ -67,3 +67,48 @@ def test_list_versions_named_first_then_auto(tmp_path):
     named = [n for n in names if n.startswith("named-")]
     auto = [n for n in names if n.startswith("auto-")]
     assert names == named + auto
+
+
+import os
+import time
+from datetime import datetime, timedelta
+
+
+def test_prune_keeps_named_versions(tmp_path):
+    vm = VersionManager(work_dir=tmp_path)
+    vm.save_as_version(_sample_points(), name="keepme")
+    history = tmp_path / "points_history"
+    named = history / "named-keepme.json"
+    old_time = (datetime.now() - timedelta(days=365)).timestamp()
+    os.utime(named, (old_time, old_time))
+
+    vm.prune(max_auto=50, max_age_days=30)
+
+    assert named.exists()
+
+
+def test_prune_removes_old_auto_snapshots(tmp_path):
+    vm = VersionManager(work_dir=tmp_path)
+    vm.save(_sample_points())
+    history = tmp_path / "points_history"
+    snapshot = next(history.glob("auto-*.json"))
+    old_time = (datetime.now() - timedelta(days=60)).timestamp()
+    os.utime(snapshot, (old_time, old_time))
+
+    vm.prune(max_auto=50, max_age_days=30)
+
+    assert not snapshot.exists()
+
+
+def test_prune_caps_auto_to_max_count(tmp_path):
+    vm = VersionManager(work_dir=tmp_path)
+    for _ in range(5):
+        vm.save(_sample_points())
+        time.sleep(0.01)
+    history = tmp_path / "points_history"
+    assert len(list(history.glob("auto-*.json"))) == 5
+
+    vm.prune(max_auto=2, max_age_days=30)
+
+    remaining = sorted(history.glob("auto-*.json"))
+    assert len(remaining) == 2
