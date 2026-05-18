@@ -324,54 +324,89 @@ def _norm(s: str) -> str:
     return s.strip().lower()
 
 
+def _norm_token(s: str) -> str:
+    """Normalize a single word for matching: lowercase, de-ligate, strip punctuation."""
+    for _k, _v in _LIGATURES.items():
+        s = s.replace(_k, _v)
+    s = s.lower()
+    s = re.sub(r"[^\w]", "", s)
+    return s
+
+
+def _bridge_word_gaps(matched_words):
+    """Extend each word's right edge to the next word's left edge when they're on
+    the same PDF line, so adjacent highlighted words form a continuous strip."""
+    bridged = []
+    n = len(matched_words)
+    for idx, w in enumerate(matched_words):
+        x0, y0, x1, y1 = float(w[0]), float(w[1]), float(w[2]), float(w[3])
+        if idx < n - 1:
+            nxt = matched_words[idx + 1]
+            nx0, ny0, ny1 = float(nxt[0]), float(nxt[1]), float(nxt[3])
+            same_line = abs(((ny0 + ny1) / 2) - ((y0 + y1) / 2)) < (y1 - y0) * 0.6
+            if same_line and nx0 > x1:
+                x1 = nx0
+        bridged.append([x0, y0, x1, y1])
+    return bridged
+
+
 def locate_quote(doc, quote: str):
-    """Return (page_index, [bbox, ...]) or None."""
+    """Return (page_index, [bbox, ...]) or None.
+
+    Bboxes are word-level (one per matched word in reading order), bridged
+    horizontally so adjacent words on the same PDF line form a continuous strip.
+    Word granularity is what keeps the highlight from cutting mid-word during
+    animation or at hold time."""
     if not quote.strip():
         return None
 
-    snippet = quote.strip().split("\n")[0]
-    snippet = snippet[:120] if len(snippet) > 120 else snippet
-    snippet_lig = _ligate(snippet)
-    short = " ".join(snippet.split()[:8])
-    short_lig = _ligate(short)
-
-    for i in range(len(doc)):
-        page = doc[i]
-        # 1) exact search; try ASCII and ligated forms
-        for s in (snippet, snippet_lig) if snippet_lig != snippet else (snippet,):
-            rects = page.search_for(s, quads=False)
-            if rects:
-                return i, [[r.x0, r.y0, r.x1, r.y1] for r in rects]
-
-        # 2) shorter exact search
-        if len(snippet) > 40:
-            for s in (short, short_lig) if short_lig != short else (short,):
-                rects = page.search_for(s, quads=False)
-                if rects:
-                    return i, [[r.x0, r.y0, r.x1, r.y1] for r in rects]
-
-    # 3) fuzzy word-sequence match
-    q_norm = _norm(quote)
-    words_q = q_norm.split()
-    if len(words_q) < 3:
+    target_tokens = [_norm_token(t) for t in _norm(quote).split()]
+    target_tokens = [t for t in target_tokens if t]
+    if len(target_tokens) < 2:
         return None
-    needle = words_q[:min(10, len(words_q))]
 
+    # Primary path: word-sequence match against page.get_text("words").
     for i in range(len(doc)):
         page = doc[i]
         words = page.get_text("words")
         if not words:
             continue
-        norm_words = [_norm(w[4]) for w in words]
-        n = len(needle)
-        for start in range(len(words) - n + 1):
-            if norm_words[start:start + n] == needle:
-                end = min(start + len(words_q), len(words))
-                xs0 = [words[k][0] for k in range(start, end)]
-                ys0 = [words[k][1] for k in range(start, end)]
-                xs1 = [words[k][2] for k in range(start, end)]
-                ys1 = [words[k][3] for k in range(start, end)]
-                return i, [[min(xs0), min(ys0), max(xs1), max(ys1)]]
+        page_tokens = [_norm_token(w[4]) for w in words]
+
+        n = len(target_tokens)
+        for start in range(len(page_tokens) - n + 1):
+            if page_tokens[start:start + n] == target_tokens:
+                matched = list(words[start:start + n])
+                return i, _bridge_word_gaps(matched)
+
+        # Looser fallback on this page: match the first ~10 distinctive tokens.
+        if len(target_tokens) >= 6:
+            needle = target_tokens[:min(10, len(target_tokens))]
+            k = len(needle)
+            for start in range(len(page_tokens) - k + 1):
+                if page_tokens[start:start + k] == needle:
+                    # Extend as far forward as tokens keep matching.
+                    end = start + k
+                    while (end < len(page_tokens)
+                           and end - start < len(target_tokens)
+                           and page_tokens[end] == target_tokens[end - start]):
+                        end += 1
+                    matched = list(words[start:end])
+                    return i, _bridge_word_gaps(matched)
+
+    # Last-ditch fallback: existing search_for path. Returns line-level rects
+    # without word granularity; the animation may then cut mid-word, but this
+    # only fires when word-sequence matching fails entirely.
+    snippet = quote.strip().split("\n")[0]
+    snippet = snippet[:120] if len(snippet) > 120 else snippet
+    snippet_lig = _ligate(snippet)
+
+    for i in range(len(doc)):
+        page = doc[i]
+        for s in (snippet, snippet_lig) if snippet_lig != snippet else (snippet,):
+            rects = page.search_for(s, quads=False)
+            if rects:
+                return i, [[r.x0, r.y0, r.x1, r.y1] for r in rects]
 
     return None
 
@@ -615,21 +650,52 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
     widths = [b[2] - b[0] for b in hl_view]
     total_w = sum(widths) or 1
 
+    def _group_visible_by_line(visible_bboxes):
+        """Group bboxes that share approximately the same vertical band."""
+        lines = []
+        for bb in visible_bboxes:
+            x0, y0, x1, y1 = bb
+            placed = False
+            for line in lines:
+                ly0, ly1 = line["y0"], line["y1"]
+                line_h = max(1, ly1 - ly0)
+                if abs(((y0 + y1) / 2) - ((ly0 + ly1) / 2)) < line_h * 0.6:
+                    line["y0"] = min(line["y0"], y0)
+                    line["y1"] = max(line["y1"], y1)
+                    line["bboxes"].append(bb)
+                    placed = True
+                    break
+            if not placed:
+                lines.append({"y0": y0, "y1": y1, "bboxes": [bb]})
+        return lines
+
     def _draw_highlight(base_img, progress):
-        """Composite a partial highlight (0..1) on top of base_img."""
+        """Composite a partial highlight (0..1) on top of base_img.
+
+        Reveals whole words at a time — never cuts mid-word. The semi-transparent
+        fill is drawn per-word so the reveal grows left-to-right; the amber
+        outline is drawn once per visible line so there are no vertical strokes
+        between adjacent words."""
         overlay = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
         od = ImageDraw.Draw(overlay)
-        target = total_w * progress
-        cum = 0
-        for (x0, y0, x1, y1), w in zip(hl_view, widths):
-            if cum >= target:
-                break
-            rem = target - cum
-            px1 = x0 + min(int(rem), w)
-            if px1 > x0:
-                od.rectangle([x0, y0, px1, y1], fill=HL_FILL)
-                od.rectangle([x0, y0, px1, y1], outline=HL_OUTLINE, width=3)
-            cum += w
+        n = len(hl_view)
+        if n == 0:
+            return base_img.convert("RGB")
+        shown = max(0, min(n, int(round(progress * n))))
+        if shown == 0:
+            return base_img.convert("RGB")
+
+        visible = hl_view[:shown]
+        for x0, y0, x1, y1 in visible:
+            od.rectangle([x0, y0, x1, y1], fill=HL_FILL)
+
+        for line in _group_visible_by_line(visible):
+            gxs0 = min(b[0] for b in line["bboxes"])
+            gys0 = min(b[1] for b in line["bboxes"])
+            gxs1 = max(b[2] for b in line["bboxes"])
+            gys1 = max(b[3] for b in line["bboxes"])
+            od.rectangle([gxs0, gys0, gxs1, gys1], outline=HL_OUTLINE, width=3)
+
         return Image.alpha_composite(base_img.convert("RGBA"), overlay).convert("RGB")
 
     tmpdir = out_path.parent

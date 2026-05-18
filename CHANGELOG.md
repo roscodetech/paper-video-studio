@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 — 2026-05-19
+
+Fixed: the highlight could end mid-word (e.g. "skin d…" instead of "skin diagnoses") during animation or at the held end-frame. The locator now does word-sequence matching against `page.get_text("words")` and returns word-level bboxes bridged horizontally, and the animation reveals whole words at a time. The amber outline is drawn once per visible line so there are no vertical strokes between adjacent words.
+
 ## 0.1.1 — 2026-05-19
 
 Fixed: title cards on rendered videos showed the PDF filename stem (e.g. `A78_R15-en`) when the source PDF lacked proper metadata. The editor now exposes Title and Authors fields in a top bar; values are written to `meta.json` on Save and again immediately before Render, so the title card always reflects the latest user input.
