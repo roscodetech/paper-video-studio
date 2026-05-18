@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 — 2026-05-19
+
+Fixed: title cards on rendered videos showed the PDF filename stem (e.g. `A78_R15-en`) when the source PDF lacked proper metadata. The editor now exposes Title and Authors fields in a top bar; values are written to `meta.json` on Save and again immediately before Render, so the title card always reflects the latest user input.
+
 ## 0.1.0 — 2026-05-18
 
 Initial release.
