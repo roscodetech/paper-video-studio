@@ -370,8 +370,59 @@ class PaperVideoEditor:
         self.status_var.set(f"Loaded {filename}")
 
     def _on_render(self) -> None:
-        # Implemented in Task 11
-        self.status_var.set("Render wiring lands in Task 11")
+        if self.dirty:
+            ok = messagebox.askyesno("Unsaved changes", "Save before rendering?")
+            if ok:
+                self._on_save()
+        out_path = self.work_dir / "paper_video.mp4"
+        cli = Path(__file__).resolve().parent / "paper_video.py"
+        cmd = [
+            sys.executable, str(cli), "render",
+            "--work", str(self.work_dir),
+            "--out", str(out_path),
+            "--voice", "edge",
+            "--voice-name", self.voice_var.get(),
+        ]
+        self.status_var.set("rendering…")
+        self._render_queue: _queue.Queue = _queue.Queue()
+
+        def worker():
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    self._render_queue.put(line.rstrip())
+                rc = proc.wait()
+                self._render_queue.put(f"__DONE__:{rc}:{out_path}")
+            except Exception as e:
+                self._render_queue.put(f"__DONE__:1:{e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(150, self._drain_render_queue)
+
+    def _drain_render_queue(self) -> None:
+        try:
+            while True:
+                line = self._render_queue.get_nowait()
+                if line.startswith("__DONE__:"):
+                    _, rc, info = line.split(":", 2)
+                    if rc == "0":
+                        self.status_var.set(f"Done: {info}")
+                        if messagebox.askyesno("Render complete", f"Open {info} in default player?"):
+                            try:
+                                os.startfile(info)  # type: ignore[attr-defined]
+                            except AttributeError:
+                                subprocess.run(["xdg-open", info], check=False)
+                    else:
+                        self.status_var.set(f"Render failed: {info}")
+                    return
+                self.status_var.set(line[-120:])
+        except _queue.Empty:
+            pass
+        self.root.after(150, self._drain_render_queue)
 
     def run(self) -> None:
         self._populate_page_selector()
