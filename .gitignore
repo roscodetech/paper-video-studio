@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+*.mp4
+*.mp3
+*.wav
+paper-video-output/
+work_*/
+tmp_*/
+.DS_Store
+Thumbs.db

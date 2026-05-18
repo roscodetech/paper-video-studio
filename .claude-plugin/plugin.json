@@ -1,0 +1,13 @@
+{
+  "name": "paper-video-studio",
+  "version": "0.1.0",
+  "description": "Convert PubMed/PMC/PDF papers into fact-checked, narrated educational videos via a 5-agent pipeline.",
+  "author": {
+    "name": "Roscoe Kerby",
+    "email": "roscoe@roscodetech.com",
+    "url": "https://roscodetech.com"
+  },
+  "homepage": "https://github.com/roscoekerby/paper-video-studio",
+  "license": "MIT",
+  "keywords": ["video", "science", "pubmed", "education", "agents"]
+}
