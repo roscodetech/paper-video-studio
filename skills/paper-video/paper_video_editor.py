@@ -12,6 +12,14 @@ from typing import List, Dict, Any
 _SENTENCE_RE = re.compile(r"[^.!?]+[.!?]")
 
 
+def launch_editor(work_dir) -> None:
+    """Launch the Tkinter editor. GUI implementation lands in Task 7+."""
+    work_dir = Path(work_dir)
+    if not work_dir.exists():
+        raise SystemExit(f"Work dir does not exist: {work_dir}")
+    print(f"Editor stub: would open {work_dir}")
+
+
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^\w\s-]", "", name.lower()).strip()
     slug = re.sub(r"[\s_]+", "-", slug)

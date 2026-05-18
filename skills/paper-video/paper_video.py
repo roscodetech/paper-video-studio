@@ -899,6 +899,13 @@ def cmd_render(args):
     print(f"   duration: {probe_duration(final):.1f}s")
 
 
+# ---------- Edit subcommand ----------
+
+def cmd_edit(args):
+    from paper_video_editor import launch_editor
+    launch_editor(args.work)
+
+
 # ---------- Main ----------
 
 def main():
@@ -926,6 +933,11 @@ def main():
     rp.add_argument("--keep", action="store_true",
                     help="Keep tmp directory for debugging")
     rp.set_defaults(func=cmd_render)
+
+    ep = sub.add_parser("edit", help="Open Tkinter editor for points.json")
+    ep.add_argument("--work", required=True, type=Path,
+                    help="Work directory containing pages.json")
+    ep.set_defaults(func=cmd_edit)
 
     args = p.parse_args()
     try:
