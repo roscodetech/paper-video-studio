@@ -154,10 +154,28 @@ class PaperVideoEditor:
         ttk.Button(btn_row, text="↓", command=lambda: self._move_point(1)).pack(side="left")
         ttk.Button(btn_row, text="🗑", command=self._remove_point).pack(side="left")
 
-        # Right placeholder (page text + edit panes wired in later tasks)
+        # Right: page selector + selectable text + (edit panes in Task 9)
         self.right = ttk.Frame(outer)
         self.right.pack(side="right", fill="both", expand=True, padx=(8, 0))
-        ttk.Label(self.right, text="Page text + edit panes wired in Tasks 8-9").pack()
+
+        top = ttk.Frame(self.right)
+        top.pack(fill="x")
+        ttk.Label(top, text="Page:").pack(side="left")
+        self.page_var = tk.StringVar()
+        self.page_selector = ttk.Combobox(top, textvariable=self.page_var, state="readonly", width=10)
+        self.page_selector.pack(side="left", padx=4)
+        self.page_selector.bind("<<ComboboxSelected>>", self._on_page_change)
+
+        self.page_text = tk.Text(self.right, height=14, wrap="word")
+        self.page_text.pack(fill="both", expand=True, pady=4)
+        self.page_text.configure(state="disabled")
+
+        ttk.Button(self.right, text="⬆ Use selection as quote", command=self._use_selection_as_quote).pack(anchor="w")
+
+        # Edit panes (wired in Task 9)
+        self.edit_frame = ttk.Frame(self.right)
+        self.edit_frame.pack(fill="both", expand=True, pady=8)
+        ttk.Label(self.edit_frame, text="Quote and narration panes land in Task 9").pack()
 
     def _refresh_point_list(self) -> None:
         self.point_listbox.delete(0, tk.END)
@@ -199,7 +217,48 @@ class PaperVideoEditor:
         self.dirty = True
         self._refresh_point_list()
 
+    def _populate_page_selector(self) -> None:
+        labels = [f"Page {p.get('page', i) + 1}" for i, p in enumerate(self.pages)]
+        self.page_selector["values"] = labels
+        if labels:
+            self.page_selector.current(0)
+            self._on_page_change(None)
+
+    def _on_page_change(self, _event) -> None:
+        idx = self.page_selector.current()
+        if idx < 0 or idx >= len(self.pages):
+            return
+        text = self.pages[idx].get("text", "")
+        self.page_text.configure(state="normal")
+        self.page_text.delete("1.0", tk.END)
+        self.page_text.insert("1.0", text)
+        self.page_text.configure(state="disabled")
+
+    def _use_selection_as_quote(self) -> None:
+        if self.selected_idx is None:
+            messagebox.showinfo("No point selected", "Select a point in the list first.")
+            return
+        try:
+            self.page_text.configure(state="normal")
+            selected = self.page_text.selection_get()
+        except tk.TclError:
+            messagebox.showinfo("No selection", "Highlight some text in the page first.")
+            return
+        finally:
+            self.page_text.configure(state="disabled")
+
+        selected = " ".join(selected.split())
+        self.points[self.selected_idx]["text"] = selected
+        self.dirty = True
+        self._refresh_point_list()
+        self._refresh_edit_panes()
+
+    def _refresh_edit_panes(self) -> None:
+        # Stub — Task 9 implements this.
+        pass
+
     def run(self) -> None:
+        self._populate_page_selector()
         self.root.mainloop()
 
 
