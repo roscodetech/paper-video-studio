@@ -1,0 +1,941 @@
+#!/usr/bin/env python3
+"""paper_video.py — Turn a scientific paper into an annotated scrolling video.
+
+Subcommands:
+  fetch <input> --out <work_dir>           Fetch PDF + metadata + per-page text
+  render --work <work_dir> --out file.mp4  Render the highlight video
+
+Designed to be driven by Claude via the 'paper-video' skill.
+"""
+
+from __future__ import annotations
+
+# Use the OS certificate store when available — required behind TLS-intercepting
+# AV / corporate proxies on Windows. Falls back to certifi if truststore is absent.
+try:
+    import truststore as _truststore
+    _truststore.inject_into_ssl()
+except ImportError:
+    pass
+
+import argparse
+import asyncio
+import io
+import json
+import logging
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
+
+LOG = logging.getLogger("paper_video")
+
+# ---------- Constants ----------
+
+VIDEO_W = 1920
+VIDEO_H = 1080
+FPS = 30
+PDF_DPI = 200
+BG_RGB = (18, 22, 32)
+BG_HEX = "0x121620"
+
+TITLE_CARD_SEC = 4.0
+END_CARD_SEC = 3.0
+MIN_POINT_SEC = 5.0
+WORDS_PER_SECOND = 2.6
+PAN_PORTION = 0.45  # first 45% of clip is the pan, then hold
+
+DEFAULT_VOICE = "en-US-AriaNeural"
+
+UA = "Mozilla/5.0 (paper-video/1.0; +https://roscodetech.com)"
+
+
+# ---------- Dataclasses ----------
+
+@dataclass
+class PaperMeta:
+    title: str = ""
+    authors: list = field(default_factory=list)
+    journal: str = ""
+    year: str = ""
+    pmid: str = ""
+    pmcid: str = ""
+    doi: str = ""
+    url: str = ""
+
+
+@dataclass
+class KeyPoint:
+    text: str
+    narration: str = ""
+
+
+# ---------- Input parsing ----------
+
+def parse_input(s: str) -> dict:
+    s = s.strip().strip('"').strip("'")
+    p = Path(s)
+    if p.exists() and p.suffix.lower() == ".pdf":
+        return {"kind": "local", "path": str(p)}
+
+    m = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", s)
+    if m:
+        return {"kind": "pmid", "id": m.group(1)}
+
+    m = re.search(r"PMC(\d+)", s, re.I)
+    if m:
+        return {"kind": "pmcid", "id": "PMC" + m.group(1)}
+
+    if s.lower().startswith(("http://", "https://")) and ".pdf" in s.lower():
+        return {"kind": "pdf_url", "url": s}
+
+    if s.isdigit():
+        return {"kind": "pmid", "id": s}
+
+    raise ValueError(f"Unsupported input: {s!r}")
+
+
+# ---------- PubMed / PMC fetching ----------
+
+def fetch_pubmed_meta(pmid: str) -> PaperMeta:
+    import requests
+    r = requests.get(
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+        params={"db": "pubmed", "id": pmid, "retmode": "json"},
+        timeout=30,
+        headers={"User-Agent": UA},
+    )
+    r.raise_for_status()
+    j = r.json()["result"][pmid]
+    return PaperMeta(
+        title=(j.get("title") or "").strip().rstrip("."),
+        authors=[a["name"] for a in j.get("authors", [])][:6],
+        journal=j.get("fulljournalname") or j.get("source") or "",
+        year=(j.get("pubdate") or "").split(" ")[0],
+        pmid=pmid,
+        doi=next((a["value"] for a in j.get("articleids", [])
+                  if a.get("idtype") == "doi"), ""),
+        url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+    )
+
+
+def pmcid_for_pmid(pmid: str) -> Optional[str]:
+    import requests
+    try:
+        r = requests.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi",
+            params={"dbfrom": "pubmed", "db": "pmc", "id": pmid, "retmode": "json"},
+            timeout=30,
+            headers={"User-Agent": UA},
+        )
+        r.raise_for_status()
+        for ls in r.json()["linksets"][0].get("linksetdbs", []):
+            if ls.get("linkname") == "pubmed_pmc":
+                ids = ls.get("links") or []
+                if ids:
+                    return "PMC" + str(ids[0])
+    except Exception as e:
+        LOG.warning("PMC link lookup failed: %s", e)
+    return None
+
+
+def download_pmc_pdf(pmcid: str, dest: Path) -> bool:
+    """Download a PMC OA article PDF via the official OA API + tgz archive."""
+    import io as _io
+    import tarfile
+    import xml.etree.ElementTree as ET
+    import requests
+
+    try:
+        r = requests.get(
+            "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi",
+            params={"id": pmcid}, timeout=30, headers={"User-Agent": UA},
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.text)
+
+        # OA returns <error code="..."> when the article isn't in the OA subset
+        err = root.find(".//error")
+        if err is not None:
+            LOG.warning("PMC OA error for %s: %s", pmcid, err.text or err.attrib)
+            return False
+
+        # Prefer pdf link, fall back to tgz
+        pdf_link = root.find(".//link[@format='pdf']")
+        tgz_link = root.find(".//link[@format='tgz']")
+
+        def _candidates(ftp_url: str) -> list:
+            """Build HTTPS candidates. NCBI moved legacy OA files into deprecated/
+            in 2026 — try that path first, then the original."""
+            base = ftp_url.replace("ftp://", "https://", 1)
+            deprecated = base.replace("/pub/pmc/", "/pub/pmc/deprecated/", 1)
+            return [deprecated, base]
+
+        if pdf_link is not None:
+            for url in _candidates(pdf_link.attrib["href"]):
+                try:
+                    rp = requests.get(url, headers={"User-Agent": UA}, timeout=120)
+                    if rp.ok and rp.content[:4] == b"%PDF":
+                        dest.write_bytes(rp.content)
+                        return True
+                except Exception:
+                    continue
+
+        if tgz_link is not None:
+            tgz_bytes = None
+            for url in _candidates(tgz_link.attrib["href"]):
+                try:
+                    rt = requests.get(url, headers={"User-Agent": UA}, timeout=180)
+                    if rt.ok and rt.content[:2] == b"\x1f\x8b":
+                        tgz_bytes = rt.content
+                        break
+                except Exception:
+                    continue
+            if tgz_bytes is None:
+                LOG.warning("Could not download tgz for %s from any mirror", pmcid)
+                return False
+            with tarfile.open(fileobj=_io.BytesIO(tgz_bytes), mode="r:gz") as tf:
+                pdfs = [m for m in tf.getmembers()
+                        if m.isfile() and m.name.lower().endswith(".pdf")]
+                if not pdfs:
+                    LOG.warning("PMC tgz had no PDF for %s", pmcid)
+                    return False
+                # Prefer the largest PDF (usually the main article)
+                pdfs.sort(key=lambda m: m.size, reverse=True)
+                f = tf.extractfile(pdfs[0])
+                if f is None:
+                    return False
+                data = f.read()
+                if data[:4] != b"%PDF":
+                    return False
+                dest.write_bytes(data)
+                return True
+
+        LOG.warning("PMC OA record had no pdf/tgz link for %s", pmcid)
+    except Exception as e:
+        LOG.warning("PMC OA download error for %s: %s", pmcid, e)
+    return False
+
+
+def download_pdf(url: str, dest: Path):
+    import requests
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=60, allow_redirects=True)
+    r.raise_for_status()
+    if r.content[:4] != b"%PDF":
+        raise RuntimeError(f"URL did not return a PDF: {url}")
+    dest.write_bytes(r.content)
+
+
+# ---------- Fetch command ----------
+
+def cmd_fetch(args):
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    pdf_path = out / "paper.pdf"
+
+    parsed = parse_input(args.input)
+    meta = PaperMeta()
+
+    if parsed["kind"] == "local":
+        shutil.copy(parsed["path"], pdf_path)
+        meta.title = Path(parsed["path"]).stem
+
+    elif parsed["kind"] == "pmid":
+        meta = fetch_pubmed_meta(parsed["id"])
+        pmcid = pmcid_for_pmid(parsed["id"])
+        if pmcid and download_pmc_pdf(pmcid, pdf_path):
+            meta.pmcid = pmcid
+        else:
+            raise SystemExit(
+                f"No free PDF available for PMID {parsed['id']}. "
+                "Provide a local PDF or a PMCID instead."
+            )
+
+    elif parsed["kind"] == "pmcid":
+        if not download_pmc_pdf(parsed["id"], pdf_path):
+            raise SystemExit(f"Could not download PDF for {parsed['id']}")
+        meta.pmcid = parsed["id"]
+
+    elif parsed["kind"] == "pdf_url":
+        download_pdf(parsed["url"], pdf_path)
+        meta.url = parsed["url"]
+        meta.title = Path(urlparse(parsed["url"]).path).stem
+
+    # Extract per-page text
+    import fitz
+    doc = fitz.open(pdf_path)
+    pages = []
+    for i, page in enumerate(doc):
+        pages.append({
+            "page": i,
+            "text": page.get_text("text"),
+            "width": page.rect.width,
+            "height": page.rect.height,
+        })
+    doc.close()
+
+    if not meta.title or meta.title in ("paper", ""):
+        first_lines = [ln.strip() for ln in (pages[0]["text"].splitlines() if pages else [])
+                       if len(ln.strip()) > 10][:3]
+        if first_lines:
+            meta.title = " ".join(first_lines)[:200]
+
+    (out / "meta.json").write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
+    (out / "pages.json").write_text(json.dumps(pages, indent=2), encoding="utf-8")
+
+    print(f"OK fetched: {pdf_path}")
+    print(f"   pages:  {len(pages)}")
+    print(f"   title:  {meta.title[:100]}")
+    print(f"   meta:   {out / 'meta.json'}")
+    print(f"   text:   {out / 'pages.json'}")
+
+
+# ---------- Quote location ----------
+
+_LIGATURES = {
+    "ﬀ": "ff",
+    "ﬁ": "fi",
+    "ﬂ": "fl",
+    "ﬃ": "ffi",
+    "ﬄ": "ffl",
+    "ﬅ": "ft",
+    "ﬆ": "st",
+}
+
+
+def _ligate(s: str) -> str:
+    """Insert PDF ligatures into a plain-ASCII string so it can match ligated PDF text."""
+    for ascii_form, lig in [("ffi", "ﬃ"), ("ffl", "ﬄ"),
+                            ("ff", "ﬀ"), ("fi", "ﬁ"), ("fl", "ﬂ")]:
+        s = s.replace(ascii_form, lig)
+    return s
+
+
+def _norm(s: str) -> str:
+    for _k, _v in _LIGATURES.items():
+        s = s.replace(_k, _v)
+    s = s.replace("‐", "-").replace("‑", "-").replace("–", "-").replace("—", "-")
+    s = s.replace(" ", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip().lower()
+
+
+def locate_quote(doc, quote: str):
+    """Return (page_index, [bbox, ...]) or None."""
+    if not quote.strip():
+        return None
+
+    snippet = quote.strip().split("\n")[0]
+    snippet = snippet[:120] if len(snippet) > 120 else snippet
+    snippet_lig = _ligate(snippet)
+    short = " ".join(snippet.split()[:8])
+    short_lig = _ligate(short)
+
+    for i in range(len(doc)):
+        page = doc[i]
+        # 1) exact search; try ASCII and ligated forms
+        for s in (snippet, snippet_lig) if snippet_lig != snippet else (snippet,):
+            rects = page.search_for(s, quads=False)
+            if rects:
+                return i, [[r.x0, r.y0, r.x1, r.y1] for r in rects]
+
+        # 2) shorter exact search
+        if len(snippet) > 40:
+            for s in (short, short_lig) if short_lig != short else (short,):
+                rects = page.search_for(s, quads=False)
+                if rects:
+                    return i, [[r.x0, r.y0, r.x1, r.y1] for r in rects]
+
+    # 3) fuzzy word-sequence match
+    q_norm = _norm(quote)
+    words_q = q_norm.split()
+    if len(words_q) < 3:
+        return None
+    needle = words_q[:min(10, len(words_q))]
+
+    for i in range(len(doc)):
+        page = doc[i]
+        words = page.get_text("words")
+        if not words:
+            continue
+        norm_words = [_norm(w[4]) for w in words]
+        n = len(needle)
+        for start in range(len(words) - n + 1):
+            if norm_words[start:start + n] == needle:
+                end = min(start + len(words_q), len(words))
+                xs0 = [words[k][0] for k in range(start, end)]
+                ys0 = [words[k][1] for k in range(start, end)]
+                xs1 = [words[k][2] for k in range(start, end)]
+                ys1 = [words[k][3] for k in range(start, end)]
+                return i, [[min(xs0), min(ys0), max(xs1), max(ys1)]]
+
+    return None
+
+
+# ---------- Rendering helpers ----------
+
+def render_pdf_page(doc, page_index: int, dpi: int = PDF_DPI):
+    import fitz
+    from PIL import Image
+    page = doc[page_index]
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+
+def draw_highlight(img, bboxes_pdf, page_w_pdf, page_h_pdf,
+                   fill=(255, 235, 59, 110), outline=(255, 193, 7, 230)):
+    from PIL import Image, ImageDraw
+    sx = img.width / page_w_pdf
+    sy = img.height / page_h_pdf
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    pad = 6
+    for bb in bboxes_pdf:
+        x0, y0, x1, y1 = bb
+        rx0, ry0 = int(x0 * sx) - pad, int(y0 * sy) - pad
+        rx1, ry1 = int(x1 * sx) + pad, int(y1 * sy) + pad
+        od.rectangle([rx0, ry0, rx1, ry1], fill=fill)
+        od.rectangle([rx0, ry0, rx1, ry1], outline=outline, width=3)
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+def highlight_pixel_bbox(img_w, img_h, bbox_pdf, page_w_pdf, page_h_pdf, pad_px=12):
+    sx = img_w / page_w_pdf
+    sy = img_h / page_h_pdf
+    x0, y0, x1, y1 = bbox_pdf
+    return (int(x0 * sx) - pad_px, int(y0 * sy) - pad_px,
+            int(x1 * sx) + pad_px, int(y1 * sy) + pad_px)
+
+
+# ---------- Font + text helpers ----------
+
+def _load_font(size, bold=False):
+    from PIL import ImageFont
+    candidates = []
+    if bold:
+        candidates += [r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arialbd.ttf"]
+    candidates += [
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for c in candidates:
+        try:
+            return ImageFont.truetype(c, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap_text(text, font, max_width):
+    from PIL import Image, ImageDraw
+    dummy = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    words = text.split()
+    lines, cur = [], []
+    for w in words:
+        cand = " ".join(cur + [w])
+        if dummy.textlength(cand, font=font) <= max_width or not cur:
+            cur.append(w)
+        else:
+            lines.append(" ".join(cur))
+            cur = [w]
+    if cur:
+        lines.append(" ".join(cur))
+    return lines
+
+
+# ---------- Static frames ----------
+
+def make_title_frame(meta: PaperMeta):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (VIDEO_W, VIDEO_H), BG_RGB)
+    d = ImageDraw.Draw(img)
+
+    f_title = _load_font(60, bold=True)
+    f_sub = _load_font(32)
+    f_meta = _load_font(26)
+
+    title_lines = _wrap_text(meta.title or "Untitled", f_title, VIDEO_W - 240)
+    title_lines = title_lines[:5]
+    line_h = 76
+    total_h = len(title_lines) * line_h
+    y = (VIDEO_H - total_h) // 2 - 80
+    for line in title_lines:
+        tw = d.textlength(line, font=f_title)
+        d.text(((VIDEO_W - tw) / 2, y), line, font=f_title, fill=(245, 245, 245))
+        y += line_h
+
+    y += 30
+    if meta.authors:
+        authors = ", ".join(meta.authors[:4])
+        if len(meta.authors) > 4:
+            authors += " et al."
+        tw = d.textlength(authors, font=f_sub)
+        d.text(((VIDEO_W - tw) / 2, y), authors, font=f_sub, fill=(180, 200, 220))
+        y += 50
+
+    cite_bits = [b for b in [meta.journal, meta.year] if b]
+    if cite_bits:
+        cite = "  ·  ".join(cite_bits)
+        tw = d.textlength(cite, font=f_meta)
+        d.text(((VIDEO_W - tw) / 2, y), cite, font=f_meta, fill=(140, 160, 180))
+
+    return img
+
+
+def make_end_frame(meta: PaperMeta):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (VIDEO_W, VIDEO_H), BG_RGB)
+    d = ImageDraw.Draw(img)
+    f_big = _load_font(54, bold=True)
+    f_sm = _load_font(28)
+
+    txt = "End of summary"
+    tw = d.textlength(txt, font=f_big)
+    d.text(((VIDEO_W - tw) / 2, VIDEO_H / 2 - 60), txt, font=f_big, fill=(245, 245, 245))
+
+    bits = [b for b in [meta.journal, meta.year,
+                        meta.doi or meta.pmcid or meta.pmid or meta.url] if b]
+    if bits:
+        cite = "  ·  ".join(bits)
+        tw = d.textlength(cite, font=f_sm)
+        d.text(((VIDEO_W - tw) / 2, VIDEO_H / 2 + 20), cite, font=f_sm, fill=(160, 180, 200))
+
+    return img
+
+
+# ---------- Clip encoding ----------
+
+def write_static_clip(img, out_path: Path, duration: float):
+    img_path = out_path.with_suffix(".png")
+    img.save(img_path)
+    vf = (f"scale={VIDEO_W}:{VIDEO_H}:force_original_aspect_ratio=decrease,"
+          f"pad={VIDEO_W}:{VIDEO_H}:(ow-iw)/2:(oh-ih)/2:color={BG_HEX}")
+    cmd = ["ffmpeg", "-y", "-loop", "1", "-i", str(img_path),
+           "-c:v", "libx264", "-t", f"{duration:.2f}",
+           "-pix_fmt", "yuv420p", "-r", str(FPS),
+           "-vf", vf, "-an", str(out_path)]
+    _run_ffmpeg(cmd)
+    img_path.unlink(missing_ok=True)
+
+
+def _ease_in_out(t):
+    return t * t * (3 - 2 * t)
+
+
+HL_FILL = (255, 235, 59, 110)
+HL_OUTLINE = (255, 193, 7, 230)
+
+
+def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
+                   out_path: Path, duration: float):
+    """Three stages:
+      1) Pan: camera moves from full page → highlight closeup. No highlight visible.
+      2) Animate: camera holds at closeup. Highlight grows left-to-right like a marker.
+      3) Hold: camera holds, full highlight visible. Single PNG looped.
+
+    Pan + Animate share one ffmpeg encode (raw RGB pipe). Hold is a separate static
+    encode. Then the two MP4s are concatenated with -c copy (safe — same encoder
+    params on both)."""
+    from PIL import Image, ImageDraw
+
+    pw, ph = page_img.size
+    sx = pw / page_w_pdf
+    sy = ph / page_h_pdf
+
+    # Highlight bboxes in page-pixel coords, sorted top-to-bottom then left-to-right
+    pad_px = 6
+    hl_page = []
+    for x0, y0, x1, y1 in bboxes_pdf:
+        hl_page.append((
+            int(x0 * sx) - pad_px,
+            int(y0 * sy) - pad_px,
+            int(x1 * sx) + pad_px,
+            int(y1 * sy) + pad_px,
+        ))
+    hl_page.sort(key=lambda b: (b[1], b[0]))
+
+    # Union bbox = camera target
+    ux0 = min(b[0] for b in hl_page)
+    uy0 = min(b[1] for b in hl_page)
+    ux1 = max(b[2] for b in hl_page)
+    uy1 = max(b[3] for b in hl_page)
+
+    start_zoom = min(VIDEO_W / pw, VIDEO_H / ph)
+    hw, hh = max(1, ux1 - ux0), max(1, uy1 - uy0)
+    end_zoom_y = (VIDEO_H * 0.42) / hh
+    end_zoom_x = (VIDEO_W * 0.78) / hw
+    end_zoom = max(start_zoom * 1.10, min(end_zoom_x, end_zoom_y, start_zoom * 3.2))
+
+    sxc, syc = pw / 2, ph / 2
+    exc, eyc = (ux0 + ux1) / 2, (uy0 + uy1) / 2
+
+    # Stage durations
+    pan_dur = min(2.0, max(1.4, duration * 0.18))
+    anim_dur = min(1.4, max(0.6, duration * 0.12))
+    hold_dur = max(0.4, duration - pan_dur - anim_dur)
+
+    pan_frames = max(2, int(pan_dur * FPS))
+    anim_frames = max(2, int(anim_dur * FPS))
+
+    def _view_at(te):
+        """Return (PIL.Image, cx0, cy0, zoom)."""
+        zoom = start_zoom + (end_zoom - start_zoom) * te
+        cx = sxc + (exc - sxc) * te
+        cy = syc + (eyc - syc) * te
+        crop_w = VIDEO_W / zoom
+        crop_h = VIDEO_H / zoom
+        cx0 = max(0.0, min(pw - crop_w, cx - crop_w / 2))
+        cy0 = max(0.0, min(ph - crop_h, cy - crop_h / 2))
+        crop = page_img.crop(
+            (int(cx0), int(cy0), int(cx0 + crop_w), int(cy0 + crop_h))
+        )
+        if crop.mode != "RGB":
+            crop = crop.convert("RGB")
+        return crop.resize((VIDEO_W, VIDEO_H), Image.LANCZOS), cx0, cy0, zoom
+
+    # End-zoom view = base for animate + hold
+    end_view, end_cx0, end_cy0, end_z = _view_at(1.0)
+
+    # Highlight bboxes mapped into the viewport (1920x1080)
+    hl_view = []
+    for x0, y0, x1, y1 in hl_page:
+        hl_view.append((
+            int((x0 - end_cx0) * end_z),
+            int((y0 - end_cy0) * end_z),
+            int((x1 - end_cx0) * end_z),
+            int((y1 - end_cy0) * end_z),
+        ))
+    widths = [b[2] - b[0] for b in hl_view]
+    total_w = sum(widths) or 1
+
+    def _draw_highlight(base_img, progress):
+        """Composite a partial highlight (0..1) on top of base_img."""
+        overlay = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        target = total_w * progress
+        cum = 0
+        for (x0, y0, x1, y1), w in zip(hl_view, widths):
+            if cum >= target:
+                break
+            rem = target - cum
+            px1 = x0 + min(int(rem), w)
+            if px1 > x0:
+                od.rectangle([x0, y0, px1, y1], fill=HL_FILL)
+                od.rectangle([x0, y0, px1, y1], outline=HL_OUTLINE, width=3)
+            cum += w
+        return Image.alpha_composite(base_img.convert("RGBA"), overlay).convert("RGB")
+
+    tmpdir = out_path.parent
+    pan_path = tmpdir / (out_path.stem + "_pan.mp4")
+    hold_path = tmpdir / (out_path.stem + "_hold.mp4")
+    hold_png = tmpdir / (out_path.stem + "_hold.png")
+    stderr_log = tmpdir / (out_path.stem + "_stderr.log")
+
+    # --- Pan + Animate stages: single rawvideo pipe ---
+    stderr_fh = open(stderr_log, "wb")
+    proc = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "rawvideo", "-pix_fmt", "rgb24",
+         "-s", f"{VIDEO_W}x{VIDEO_H}",
+         "-framerate", str(FPS), "-i", "-",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-pix_fmt", "yuv420p", "-r", str(FPS),
+         "-an", str(pan_path)],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=stderr_fh,
+    )
+    try:
+        # 1) Pan — no highlight
+        for fi in range(pan_frames):
+            te = _ease_in_out(fi / max(1, pan_frames - 1))
+            frame, _, _, _ = _view_at(te)
+            proc.stdin.write(frame.tobytes())
+
+        # 2) Animate — highlight grows L→R on the held end-view
+        for fi in range(anim_frames):
+            p = (fi + 1) / anim_frames
+            frame = _draw_highlight(end_view, p)
+            proc.stdin.write(frame.tobytes())
+
+        proc.stdin.close()
+        rc = proc.wait(timeout=240)
+        stderr_fh.close()
+        if rc != 0:
+            tail = stderr_log.read_text(encoding="utf-8", errors="ignore").splitlines()[-15:]
+            raise RuntimeError("ffmpeg pan/anim stage failed:\n" + "\n".join(tail))
+    except Exception:
+        try:
+            proc.kill()
+        finally:
+            try:
+                stderr_fh.close()
+            except Exception:
+                pass
+        raise
+    finally:
+        stderr_log.unlink(missing_ok=True)
+
+    # --- 3) Hold: full highlight, looped PNG ---
+    full_hold = _draw_highlight(end_view, 1.0)
+    full_hold.save(hold_png)
+    _run_ffmpeg([
+        "ffmpeg", "-y", "-loop", "1", "-i", str(hold_png),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-t", f"{hold_dur:.3f}", "-an", str(hold_path),
+    ])
+
+    # --- Concat pan+anim and hold (same encoder params on both) ---
+    list_file = tmpdir / (out_path.stem + "_concat.txt")
+    list_file.write_text(
+        f"file '{pan_path.resolve().as_posix()}'\nfile '{hold_path.resolve().as_posix()}'\n",
+        encoding="utf-8",
+    )
+    _run_ffmpeg([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(list_file), "-c", "copy", str(out_path),
+    ])
+
+    for p in (pan_path, hold_path, hold_png, list_file):
+        p.unlink(missing_ok=True)
+
+
+def _run_ffmpeg(cmd):
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        tail = "\n".join((res.stderr or "").splitlines()[-15:])
+        LOG.error("ffmpeg failed: %s\n%s", " ".join(cmd[:4]), tail)
+        raise RuntimeError("ffmpeg failed")
+
+
+# ---------- TTS ----------
+
+def tts_edge(text: str, out_path: Path, voice: str = DEFAULT_VOICE):
+    import edge_tts
+
+    async def _gen():
+        comm = edge_tts.Communicate(text, voice)
+        await comm.save(str(out_path))
+
+    asyncio.run(_gen())
+
+
+def probe_duration(media_path: Path) -> float:
+    if not media_path or not Path(media_path).exists():
+        return 0.0
+    res = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(media_path)],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(res.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+# ---------- Concat ----------
+
+def mux_clip_with_audio(clip: Path, audio: Optional[Path], out: Path):
+    if audio and audio.exists():
+        cmd = ["ffmpeg", "-y",
+               "-i", str(clip), "-i", str(audio),
+               "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+               "-map", "0:v:0", "-map", "1:a:0",
+               "-shortest", str(out)]
+    else:
+        # Generate silent track of matching duration
+        dur = probe_duration(clip)
+        cmd = ["ffmpeg", "-y",
+               "-i", str(clip),
+               "-f", "lavfi", "-t", f"{dur:.3f}",
+               "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+               "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+               "-map", "0:v:0", "-map", "1:a:0",
+               "-shortest", str(out)]
+    _run_ffmpeg(cmd)
+
+
+def concat_clips(merged_clips, out_path: Path, work_tmp: Path):
+    """Concat via the concat filter, which re-encodes and rebuilds timestamps.
+
+    The concat demuxer with -c copy duplicates AAC packets when source clips
+    have different encoder delay/priming, producing an audio stream much longer
+    than the video. The concat filter avoids this at the cost of a re-encode."""
+    n = len(merged_clips)
+    cmd = ["ffmpeg", "-y"]
+    for c in merged_clips:
+        cmd.extend(["-i", str(c)])
+
+    streams = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n))
+    filter_str = f"{streams}concat=n={n}:v=1:a=1[v][a]"
+
+    cmd.extend([
+        "-filter_complex", filter_str,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        str(out_path),
+    ])
+    _run_ffmpeg(cmd)
+
+
+# ---------- Render command ----------
+
+def cmd_render(args):
+    work = Path(args.work)
+    if not (work / "meta.json").exists() or not (work / "paper.pdf").exists():
+        raise SystemExit(f"Missing meta.json or paper.pdf in {work}")
+    if not (work / "points.json").exists():
+        raise SystemExit(f"Missing {work / 'points.json'} — write the key points first")
+
+    meta = PaperMeta(**json.loads((work / "meta.json").read_text(encoding="utf-8")))
+    raw_points = json.loads((work / "points.json").read_text(encoding="utf-8"))
+    points = [KeyPoint(text=p["text"], narration=(p.get("narration") or p["text"]).strip())
+              for p in raw_points if p.get("text")]
+    if not points:
+        raise SystemExit("points.json is empty")
+
+    import fitz
+    doc = fitz.open(work / "paper.pdf")
+
+    voice_on = args.voice == "edge"
+    voice_name = args.voice_name or DEFAULT_VOICE
+
+    tmpdir = work / "tmp"
+    tmpdir.mkdir(exist_ok=True)
+    clips: list[Path] = []
+    audios: list[Optional[Path]] = []
+
+    # Title card
+    title_audio: Optional[Path] = None
+    if voice_on:
+        title_narr = (meta.title or "Untitled").rstrip(".") + "."
+        if meta.authors:
+            title_narr += " By " + ", ".join(meta.authors[:3]) + "."
+        title_audio = tmpdir / "00_title.mp3"
+        try:
+            tts_edge(title_narr, title_audio, voice_name)
+        except Exception as e:
+            LOG.warning("TTS title failed: %s", e)
+            title_audio = None
+
+    title_dur = max(TITLE_CARD_SEC,
+                    (probe_duration(title_audio) + 0.6) if title_audio else 0.0)
+    title_clip = tmpdir / "00_title.mp4"
+    write_static_clip(make_title_frame(meta), title_clip, title_dur)
+    clips.append(title_clip)
+    audios.append(title_audio)
+
+    # Per-point clips
+    rendered_points = 0
+    for idx, kp in enumerate(points, 1):
+        found = locate_quote(doc, kp.text)
+        if not found:
+            LOG.warning("Could not locate quote (skipping): %r", kp.text[:80])
+            continue
+        page_idx, bboxes = found
+
+        page_img = render_pdf_page(doc, page_idx, dpi=PDF_DPI)
+        page = doc[page_idx]
+
+        clip_audio: Optional[Path] = None
+        if voice_on:
+            clip_audio = tmpdir / f"{idx:02d}_point.mp3"
+            try:
+                tts_edge(kp.narration, clip_audio, voice_name)
+            except Exception as e:
+                LOG.warning("TTS point %d failed: %s", idx, e)
+                clip_audio = None
+
+        if clip_audio:
+            dur = max(MIN_POINT_SEC, probe_duration(clip_audio) + 1.2)
+        else:
+            words = len(kp.narration.split())
+            dur = max(MIN_POINT_SEC, words / WORDS_PER_SECOND + 1.8)
+
+        clip_path = tmpdir / f"{idx:02d}_point.mp4"
+        write_pan_clip(page_img, bboxes, page.rect.width, page.rect.height,
+                       clip_path, dur)
+        clips.append(clip_path)
+        audios.append(clip_audio)
+        rendered_points += 1
+        print(f"  point {idx}/{len(points)} on page {page_idx + 1} ({dur:.1f}s)")
+
+    if rendered_points == 0:
+        raise SystemExit("None of the key points could be located in the PDF.")
+
+    # End card
+    end_clip = tmpdir / "99_end.mp4"
+    write_static_clip(make_end_frame(meta), end_clip, END_CARD_SEC)
+    clips.append(end_clip)
+    audios.append(None)
+
+    # Mux each clip with its audio, then concat
+    mux_dir = tmpdir / "mux"
+    mux_dir.mkdir(exist_ok=True)
+    merged = []
+    for i, (clip, audio) in enumerate(zip(clips, audios)):
+        out = mux_dir / f"m_{i:02d}.mp4"
+        mux_clip_with_audio(clip, audio, out)
+        merged.append(out)
+
+    final = Path(args.out)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    concat_clips(merged, final, tmpdir)
+
+    if not args.keep:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    print(f"\nOK rendered: {final}")
+    print(f"   points rendered: {rendered_points}/{len(points)}")
+    print(f"   duration: {probe_duration(final):.1f}s")
+
+
+# ---------- Main ----------
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    p = argparse.ArgumentParser(prog="paper_video",
+                                description="Turn a paper into an annotated scrolling video")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    fp = sub.add_parser("fetch", help="Fetch PDF + extract text")
+    fp.add_argument("input",
+                    help="PubMed URL/PMID, PMC URL/PMCID, PDF URL, or local PDF path")
+    fp.add_argument("--out", default="work",
+                    help="Output directory (default: work)")
+    fp.set_defaults(func=cmd_fetch)
+
+    rp = sub.add_parser("render", help="Render the video")
+    rp.add_argument("--work", default="work",
+                    help="Work dir with paper.pdf, meta.json, points.json")
+    rp.add_argument("--out", required=True, help="Output MP4 path")
+    rp.add_argument("--voice", choices=["edge", "none"], default="edge",
+                    help="Voiceover (default: edge)")
+    rp.add_argument("--voice-name", default=DEFAULT_VOICE,
+                    help="edge-tts voice name (default: %(default)s)")
+    rp.add_argument("--keep", action="store_true",
+                    help="Keep tmp directory for debugging")
+    rp.set_defaults(func=cmd_render)
+
+    args = p.parse_args()
+    try:
+        args.func(args)
+    except SystemExit:
+        raise
+    except Exception as e:
+        LOG.error("%s", e)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
