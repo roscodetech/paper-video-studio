@@ -172,10 +172,19 @@ class PaperVideoEditor:
 
         ttk.Button(self.right, text="⬆ Use selection as quote", command=self._use_selection_as_quote).pack(anchor="w")
 
-        # Edit panes (wired in Task 9)
+        # Edit panes
         self.edit_frame = ttk.Frame(self.right)
-        self.edit_frame.pack(fill="both", expand=True, pady=8)
-        ttk.Label(self.edit_frame, text="Quote and narration panes land in Task 9").pack()
+        self.edit_frame.pack(fill="both", expand=False, pady=8)
+
+        ttk.Label(self.edit_frame, text="Quote (editable):").pack(anchor="w")
+        self.quote_text = tk.Text(self.edit_frame, height=3, wrap="word")
+        self.quote_text.pack(fill="x")
+        self.quote_text.bind("<<Modified>>", self._on_quote_modified)
+
+        ttk.Label(self.edit_frame, text="Narration (editable):").pack(anchor="w", pady=(6, 0))
+        self.narration_text = tk.Text(self.edit_frame, height=5, wrap="word")
+        self.narration_text.pack(fill="x")
+        self.narration_text.bind("<<Modified>>", self._on_narration_modified)
 
     def _refresh_point_list(self) -> None:
         self.point_listbox.delete(0, tk.END)
@@ -186,8 +195,10 @@ class PaperVideoEditor:
             self.point_listbox.selection_set(self.selected_idx)
 
     def _on_point_select(self, _event) -> None:
+        self._sync_edit_panes_to_model()
         sel = self.point_listbox.curselection()
         self.selected_idx = sel[0] if sel else None
+        self._refresh_edit_panes()
 
     def _add_point(self) -> None:
         self.points.append({"text": "", "narration": ""})
@@ -254,8 +265,48 @@ class PaperVideoEditor:
         self._refresh_edit_panes()
 
     def _refresh_edit_panes(self) -> None:
-        # Stub — Task 9 implements this.
-        pass
+        self._suppress_dirty = True
+        self.quote_text.delete("1.0", tk.END)
+        self.narration_text.delete("1.0", tk.END)
+        if self.selected_idx is not None and 0 <= self.selected_idx < len(self.points):
+            p = self.points[self.selected_idx]
+            self.quote_text.insert("1.0", p.get("text", ""))
+            self.narration_text.insert("1.0", p.get("narration", ""))
+        self.quote_text.edit_modified(False)
+        self.narration_text.edit_modified(False)
+        self._suppress_dirty = False
+
+    def _on_quote_modified(self, _event) -> None:
+        if self._suppress_dirty:
+            self.quote_text.edit_modified(False)
+            return
+        if self.selected_idx is None:
+            return
+        new_value = self.quote_text.get("1.0", "end-1c")
+        self.points[self.selected_idx]["text"] = new_value
+        self.dirty = True
+        self.quote_text.edit_modified(False)
+        self.point_listbox.delete(self.selected_idx)
+        self.point_listbox.insert(self.selected_idx, f"{self.selected_idx+1}. {new_value[:50]}")
+        self.point_listbox.selection_set(self.selected_idx)
+
+    def _on_narration_modified(self, _event) -> None:
+        if self._suppress_dirty:
+            self.narration_text.edit_modified(False)
+            return
+        if self.selected_idx is None:
+            return
+        new_value = self.narration_text.get("1.0", "end-1c")
+        self.points[self.selected_idx]["narration"] = new_value
+        self.dirty = True
+        self.narration_text.edit_modified(False)
+
+    def _sync_edit_panes_to_model(self) -> None:
+        if self.selected_idx is None:
+            return
+        if 0 <= self.selected_idx < len(self.points):
+            self.points[self.selected_idx]["text"] = self.quote_text.get("1.0", "end-1c")
+            self.points[self.selected_idx]["narration"] = self.narration_text.get("1.0", "end-1c")
 
     def run(self) -> None:
         self._populate_page_selector()
