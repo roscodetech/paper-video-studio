@@ -12,12 +12,7 @@ from typing import List, Dict, Any
 _SENTENCE_RE = re.compile(r"[^.!?]+[.!?]")
 
 
-def launch_editor(work_dir) -> None:
-    """Launch the Tkinter editor. GUI implementation lands in Task 7+."""
-    work_dir = Path(work_dir)
-    if not work_dir.exists():
-        raise SystemExit(f"Work dir does not exist: {work_dir}")
-    print(f"Editor stub: would open {work_dir}")
+# GUI launcher defined at the bottom of this file once PaperVideoEditor is declared.
 
 
 def _slugify(name: str) -> str:
@@ -95,6 +90,125 @@ class VersionManager:
                 path.unlink()
                 deleted += 1
         return deleted
+
+
+# ---------- Tkinter editor ----------
+
+import os
+import queue as _queue
+import subprocess
+import sys
+import threading
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+
+
+class PaperVideoEditor:
+    def __init__(self, work_dir: Path):
+        self.work_dir = Path(work_dir)
+        self.vm = VersionManager(self.work_dir)
+        self.points: list = []
+        self.selected_idx: int | None = None
+        self.dirty = False
+        self._suppress_dirty = False
+
+        self._load_points_or_defaults()
+        pages_file = self.work_dir / "pages.json"
+        self.pages = json.loads(pages_file.read_text(encoding="utf-8")) if pages_file.exists() else []
+
+        self.root = tk.Tk()
+        self.root.title(f"Paper Video Editor — {self.work_dir.name}")
+        self.root.geometry("1200x720")
+        self._build_layout()
+        self._refresh_point_list()
+
+    def _load_points_or_defaults(self) -> None:
+        working = self.work_dir / "points.json"
+        if working.exists():
+            self.points = json.loads(working.read_text(encoding="utf-8"))
+            return
+        pages_file = self.work_dir / "pages.json"
+        if pages_file.exists():
+            pages = json.loads(pages_file.read_text(encoding="utf-8"))
+            self.points = naive_defaults(pages, max_points=5)
+        else:
+            self.points = []
+
+    def _build_layout(self) -> None:
+        outer = ttk.Frame(self.root, padding=8)
+        outer.pack(fill="both", expand=True)
+
+        # Left: points list + controls
+        left = ttk.Frame(outer)
+        left.pack(side="left", fill="y")
+
+        ttk.Label(left, text="Points").pack(anchor="w")
+        self.point_listbox = tk.Listbox(left, width=40, height=24, exportselection=False)
+        self.point_listbox.pack(fill="y", expand=False)
+        self.point_listbox.bind("<<ListboxSelect>>", self._on_point_select)
+
+        btn_row = ttk.Frame(left)
+        btn_row.pack(fill="x", pady=4)
+        ttk.Button(btn_row, text="+ Add", command=self._add_point).pack(side="left")
+        ttk.Button(btn_row, text="↑", command=lambda: self._move_point(-1)).pack(side="left")
+        ttk.Button(btn_row, text="↓", command=lambda: self._move_point(1)).pack(side="left")
+        ttk.Button(btn_row, text="🗑", command=self._remove_point).pack(side="left")
+
+        # Right placeholder (page text + edit panes wired in later tasks)
+        self.right = ttk.Frame(outer)
+        self.right.pack(side="right", fill="both", expand=True, padx=(8, 0))
+        ttk.Label(self.right, text="Page text + edit panes wired in Tasks 8-9").pack()
+
+    def _refresh_point_list(self) -> None:
+        self.point_listbox.delete(0, tk.END)
+        for i, p in enumerate(self.points):
+            label = f"{i+1}. {p.get('text', '')[:50]}"
+            self.point_listbox.insert(tk.END, label)
+        if self.selected_idx is not None and 0 <= self.selected_idx < len(self.points):
+            self.point_listbox.selection_set(self.selected_idx)
+
+    def _on_point_select(self, _event) -> None:
+        sel = self.point_listbox.curselection()
+        self.selected_idx = sel[0] if sel else None
+
+    def _add_point(self) -> None:
+        self.points.append({"text": "", "narration": ""})
+        self.selected_idx = len(self.points) - 1
+        self.dirty = True
+        self._refresh_point_list()
+
+    def _remove_point(self) -> None:
+        if self.selected_idx is None:
+            return
+        del self.points[self.selected_idx]
+        self.selected_idx = None
+        self.dirty = True
+        self._refresh_point_list()
+
+    def _move_point(self, delta: int) -> None:
+        if self.selected_idx is None:
+            return
+        new_idx = self.selected_idx + delta
+        if not (0 <= new_idx < len(self.points)):
+            return
+        self.points[self.selected_idx], self.points[new_idx] = (
+            self.points[new_idx],
+            self.points[self.selected_idx],
+        )
+        self.selected_idx = new_idx
+        self.dirty = True
+        self._refresh_point_list()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+def launch_editor(work_dir) -> None:
+    work_dir = Path(work_dir)
+    if not work_dir.exists():
+        raise SystemExit(f"Work dir does not exist: {work_dir}")
+    editor = PaperVideoEditor(work_dir)
+    editor.run()
 
 
 def naive_defaults(pages: List[Dict[str, Any]], max_points: int = 5) -> List[Dict[str, str]]:
