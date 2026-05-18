@@ -333,6 +333,69 @@ def _norm_token(s: str) -> str:
     return s
 
 
+# Words that should never be the visible last token of a highlight.
+_STOP_WORDS_AT_END = {
+    "a", "an", "the",
+    "and", "or", "but", "nor", "so", "yet",
+    "of", "to", "in", "on", "at", "by", "with", "from", "for",
+    "into", "onto", "over", "under", "through", "between", "across",
+    "as", "than", "that", "which", "who", "whom",
+    "is", "are", "was", "were", "be", "been", "being",
+    "has", "have", "had", "do", "does", "did",
+    "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+}
+
+# Punctuation chars that terminate a clause/sentence/list-item.
+_BOUNDARY_PUNCT_RE = re.compile(r"[.,;:!?—–\)\]]\s*$")
+
+
+def _ends_at_natural_boundary(word_text: str) -> bool:
+    """True if this raw word ends with sentence/clause punctuation."""
+    return bool(_BOUNDARY_PUNCT_RE.search(word_text))
+
+
+def _smart_extend_forward(words, end_idx: int, max_extra: int = 6) -> int:
+    """Adjust the matched-range end so the highlight lands at a natural boundary.
+
+    If the matched-range's last word already ends with punctuation, leave it alone.
+    Otherwise look ahead up to max_extra words on or near the same line:
+      - if any of them ends with punctuation, extend through that word;
+      - otherwise, if the original last word is a stop word (preposition, article,
+        conjunction, auxiliary), extend by exactly one word so the highlight never
+        terminates on a weak word;
+      - otherwise leave the range unchanged.
+
+    Stops if we cross what looks like a paragraph break (vertical jump > 2x line height)."""
+    if end_idx <= 0 or end_idx >= len(words):
+        return end_idx
+
+    last = words[end_idx - 1]
+    if _ends_at_natural_boundary(last[4]):
+        return end_idx
+
+    last_y_mid = (last[1] + last[3]) / 2
+    last_h = max(1.0, last[3] - last[1])
+
+    found_punct_end = end_idx
+    for j in range(end_idx, min(end_idx + max_extra, len(words))):
+        w = words[j]
+        w_y_mid = (w[1] + w[3]) / 2
+        if abs(w_y_mid - last_y_mid) > last_h * 2.0:
+            break
+        if _ends_at_natural_boundary(w[4]):
+            found_punct_end = j + 1
+            break
+        last_y_mid = w_y_mid
+
+    if found_punct_end > end_idx:
+        return found_punct_end
+
+    if _norm_token(last[4]) in _STOP_WORDS_AT_END:
+        return min(end_idx + 1, len(words))
+
+    return end_idx
+
+
 def _bridge_word_gaps(matched_words):
     """Extend each word's right edge to the next word's left edge when they're on
     the same PDF line, so adjacent highlighted words form a continuous strip."""
@@ -376,7 +439,8 @@ def locate_quote(doc, quote: str):
         n = len(target_tokens)
         for start in range(len(page_tokens) - n + 1):
             if page_tokens[start:start + n] == target_tokens:
-                matched = list(words[start:start + n])
+                end = _smart_extend_forward(words, start + n)
+                matched = list(words[start:end])
                 return i, _bridge_word_gaps(matched)
 
         # Looser fallback on this page: match the first ~10 distinctive tokens.
@@ -391,6 +455,7 @@ def locate_quote(doc, quote: str):
                            and end - start < len(target_tokens)
                            and page_tokens[end] == target_tokens[end - start]):
                         end += 1
+                    end = _smart_extend_forward(words, end)
                     matched = list(words[start:end])
                     return i, _bridge_word_gaps(matched)
 

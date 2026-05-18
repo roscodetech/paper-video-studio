@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 — 2026-05-19
+
+Improved: highlight boundaries now snap to natural clause/sentence breaks. After the matched word sequence, the locator looks ahead up to 6 words for a word ending in `.,;:!?—)` and extends the highlight to include it. If the matched range would otherwise end on a weak word (preposition, article, conjunction, auxiliary) and no punctuation is within reach, the range is bumped forward by one word so the highlight never terminates on "of", "the", "and", etc. Paragraph breaks (large vertical jumps) stop the extension.
+
 ## 0.1.2 — 2026-05-19
 
 Fixed: the highlight could end mid-word (e.g. "skin d…" instead of "skin diagnoses") during animation or at the held end-frame. The locator now does word-sequence matching against `page.get_text("words")` and returns word-level bboxes bridged horizontally, and the animation reveals whole words at a time. The amber outline is drawn once per visible line so there are no vertical strokes between adjacent words.
