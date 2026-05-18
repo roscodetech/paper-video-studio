@@ -135,6 +135,11 @@ class PaperVideoEditor:
             self.points = []
 
     def _build_layout(self) -> None:
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        self.versions_menu = tk.Menu(menubar, tearoff=False)
+        menubar.add_cascade(label="Versions", menu=self.versions_menu)
+
         outer = ttk.Frame(self.root, padding=8)
         outer.pack(fill="both", expand=True)
 
@@ -185,6 +190,24 @@ class PaperVideoEditor:
         self.narration_text = tk.Text(self.edit_frame, height=5, wrap="word")
         self.narration_text.pack(fill="x")
         self.narration_text.bind("<<Modified>>", self._on_narration_modified)
+
+        # Bottom bar
+        bottom = ttk.Frame(self.root, padding=8)
+        bottom.pack(side="bottom", fill="x")
+
+        ttk.Label(bottom, text="Voice:").pack(side="left")
+        self.voice_var = tk.StringVar(value="en-US-AriaNeural")
+        voices = ["en-US-AriaNeural", "en-US-GuyNeural", "en-GB-RyanNeural", "en-AU-NatashaNeural"]
+        ttk.Combobox(bottom, textvariable=self.voice_var, values=voices, state="readonly", width=22).pack(side="left", padx=4)
+
+        ttk.Button(bottom, text="💾 Save", command=self._on_save).pack(side="left", padx=8)
+        ttk.Button(bottom, text="Save as version…", command=self._on_save_as_version).pack(side="left")
+        ttk.Button(bottom, text="🎬 Render Video", command=self._on_render).pack(side="left", padx=8)
+
+        self.status_var = tk.StringVar(value="idle")
+        ttk.Label(bottom, textvariable=self.status_var).pack(side="left", padx=8)
+
+        self._rebuild_versions_menu()
 
     def _refresh_point_list(self) -> None:
         self.point_listbox.delete(0, tk.END)
@@ -307,6 +330,48 @@ class PaperVideoEditor:
         if 0 <= self.selected_idx < len(self.points):
             self.points[self.selected_idx]["text"] = self.quote_text.get("1.0", "end-1c")
             self.points[self.selected_idx]["narration"] = self.narration_text.get("1.0", "end-1c")
+
+    def _on_save(self) -> None:
+        self._sync_edit_panes_to_model()
+        snapshot = self.vm.save(self.points)
+        self.dirty = False
+        self.status_var.set(f"Saved + snapshot {snapshot.name}")
+        self._rebuild_versions_menu()
+
+    def _on_save_as_version(self) -> None:
+        self._sync_edit_panes_to_model()
+        name = simpledialog.askstring("Save as version", "Name this version:")
+        if not name:
+            return
+        path = self.vm.save_as_version(self.points, name=name)
+        self.status_var.set(f"Saved version {path.name}")
+        self._rebuild_versions_menu()
+
+    def _rebuild_versions_menu(self) -> None:
+        self.versions_menu.delete(0, tk.END)
+        versions = self.vm.list_versions()
+        if not versions:
+            self.versions_menu.add_command(label="(no versions yet)", state="disabled")
+            return
+        for v in versions:
+            fname = v["filename"]
+            self.versions_menu.add_command(label=fname, command=lambda f=fname: self._load_version(f))
+
+    def _load_version(self, filename: str) -> None:
+        if self.dirty:
+            ok = messagebox.askyesno("Unsaved changes", "Discard unsaved changes and load this version?")
+            if not ok:
+                return
+        self.points = self.vm.load(filename)
+        self.selected_idx = None
+        self.dirty = False
+        self._refresh_point_list()
+        self._refresh_edit_panes()
+        self.status_var.set(f"Loaded {filename}")
+
+    def _on_render(self) -> None:
+        # Implemented in Task 11
+        self.status_var.set("Render wiring lands in Task 11")
 
     def run(self) -> None:
         self._populate_page_selector()
