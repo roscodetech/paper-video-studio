@@ -98,6 +98,23 @@ Output is an MP4 at 1920×1080, 30fps, H.264 + AAC.
 
 Tell the user the path. If they're on Windows and want to preview, `start "" <path>` opens it in the default player.
 
+### Step 5 — Edit (optional)
+
+The skill ships with a Tkinter desktop editor for revising `points.json` after the agents finish. Launch:
+
+```bash
+python "<plugin_path>/skills/paper-video/paper_video.py" edit --work <work_dir>
+```
+
+The editor supports:
+- Picking quote text by selecting it from the extracted page view.
+- Editing narration per point.
+- Adding, removing, and reordering points.
+- Auto-snapshot versioning on every Save, plus named versions via "Save as version…".
+- Rendering directly from the editor with a voice picker.
+
+When invoked inside the `paper-video-studio` plugin via `/paper-video`, the orchestrator offers to launch the editor between flow-editor and render. Users can also launch it standalone at any time pointing at any work directory that has at least `pages.json`.
+
 ## End-to-End Example
 
 ```bash
