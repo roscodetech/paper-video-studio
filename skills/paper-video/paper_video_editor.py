@@ -116,6 +116,9 @@ class PaperVideoEditor:
         pages_file = self.work_dir / "pages.json"
         self.pages = json.loads(pages_file.read_text(encoding="utf-8")) if pages_file.exists() else []
 
+        meta_file = self.work_dir / "meta.json"
+        self.meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
+
         self.root = tk.Tk()
         self.root.title(f"Paper Video Editor — {self.work_dir.name}")
         self.root.geometry("1200x720")
@@ -139,6 +142,27 @@ class PaperVideoEditor:
         self.root.config(menu=menubar)
         self.versions_menu = tk.Menu(menubar, tearoff=False)
         menubar.add_cascade(label="Versions", menu=self.versions_menu)
+
+        # Top meta bar (title + authors): shown above the left/right split because
+        # they apply to the whole video, not the selected point.
+        meta_bar = ttk.Frame(self.root, padding=(8, 4))
+        meta_bar.pack(side="top", fill="x")
+
+        ttk.Label(meta_bar, text="Title:").grid(row=0, column=0, sticky="w")
+        self.title_var = tk.StringVar(value=self.meta.get("title", ""))
+        self.title_entry = ttk.Entry(meta_bar, textvariable=self.title_var)
+        self.title_entry.grid(row=0, column=1, sticky="ew", padx=(4, 16))
+        self.title_var.trace_add("write", lambda *_: self._on_meta_modified())
+
+        ttk.Label(meta_bar, text="Authors:").grid(row=0, column=2, sticky="w")
+        authors_initial = ", ".join(self.meta.get("authors", []) or [])
+        self.authors_var = tk.StringVar(value=authors_initial)
+        self.authors_entry = ttk.Entry(meta_bar, textvariable=self.authors_var)
+        self.authors_entry.grid(row=0, column=3, sticky="ew", padx=4)
+        self.authors_var.trace_add("write", lambda *_: self._on_meta_modified())
+
+        meta_bar.columnconfigure(1, weight=2)
+        meta_bar.columnconfigure(3, weight=1)
 
         outer = ttk.Frame(self.root, padding=8)
         outer.pack(fill="both", expand=True)
@@ -331,8 +355,25 @@ class PaperVideoEditor:
             self.points[self.selected_idx]["text"] = self.quote_text.get("1.0", "end-1c")
             self.points[self.selected_idx]["narration"] = self.narration_text.get("1.0", "end-1c")
 
+    def _on_meta_modified(self) -> None:
+        if self._suppress_dirty:
+            return
+        self.dirty = True
+
+    def _sync_meta_to_model_and_disk(self) -> None:
+        """Push title + authors from UI back into self.meta and write meta.json."""
+        self.meta["title"] = self.title_var.get().strip()
+        authors_str = self.authors_var.get().strip()
+        self.meta["authors"] = [a.strip() for a in authors_str.split(",") if a.strip()]
+        meta_file = self.work_dir / "meta.json"
+        meta_file.write_text(
+            json.dumps(self.meta, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     def _on_save(self) -> None:
         self._sync_edit_panes_to_model()
+        self._sync_meta_to_model_and_disk()
         snapshot = self.vm.save(self.points)
         self.dirty = False
         self.status_var.set(f"Saved + snapshot {snapshot.name}")
@@ -374,6 +415,8 @@ class PaperVideoEditor:
             ok = messagebox.askyesno("Unsaved changes", "Save before rendering?")
             if ok:
                 self._on_save()
+        # Always sync meta to disk before render — render reads meta.json fresh.
+        self._sync_meta_to_model_and_disk()
         out_path = self.work_dir / "paper_video.mp4"
         cli = Path(__file__).resolve().parent / "paper_video.py"
         cmd = [
