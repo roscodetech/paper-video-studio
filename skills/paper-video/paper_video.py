@@ -629,6 +629,59 @@ def _ease_in_out(t):
     return t * t * (3 - 2 * t)
 
 
+def _normalize_line_heights(bboxes, pad_x: int = 6):
+    """Replace each line group's vertical bounds with a canonical (cy ± half_h)
+    so every line of the highlight has the same height. Adjacent lines get a
+    consistent gap regardless of which words sit on them (descenders like 'g',
+    ascenders like 'h', or superscripts won't deform the outline).
+
+    Input bboxes are in page-pixel coords without padding. Output bboxes carry
+    `pad_x` of horizontal padding and a uniform vertical extent per line."""
+    if not bboxes:
+        return list(bboxes)
+
+    heights = sorted(b[3] - b[1] for b in bboxes)
+    typical_h = max(1, heights[len(heights) // 2])
+
+    lines = []  # each: {"centers": [...], "members": [bb...]}
+    for bb in bboxes:
+        x0, y0, x1, y1 = bb
+        cy = (y0 + y1) / 2.0
+        placed = False
+        for line in lines:
+            line_cy = sum(line["centers"]) / len(line["centers"])
+            if abs(cy - line_cy) < typical_h * 0.7:
+                line["centers"].append(cy)
+                line["members"].append(bb)
+                placed = True
+                break
+        if not placed:
+            lines.append({"centers": [cy], "members": [bb]})
+
+    line_centers = [sum(L["centers"]) / len(L["centers"]) for L in lines]
+    sorted_centers = sorted(line_centers)
+    if len(sorted_centers) >= 2:
+        gaps = [sorted_centers[i + 1] - sorted_centers[i]
+                for i in range(len(sorted_centers) - 1)]
+        median_gap = sorted(gaps)[len(gaps) // 2]
+        # Half-height stays inside ~42% of the line-to-line spacing so adjacent
+        # outlines never touch, regardless of which letters sit on each line.
+        half_h = max(int(typical_h * 0.55), int(median_gap * 0.42))
+    else:
+        half_h = int(typical_h * 0.7)
+
+    normalized = []
+    for cy, line in zip(line_centers, lines):
+        y0 = int(round(cy - half_h))
+        y1 = int(round(cy + half_h))
+        for bb in line["members"]:
+            x0, _, x1, _ = bb
+            normalized.append((x0 - pad_x, y0, x1 + pad_x, y1))
+
+    normalized.sort(key=lambda b: (b[1], b[0]))
+    return normalized
+
+
 HL_FILL = (255, 235, 59, 110)
 HL_OUTLINE = (255, 193, 7, 230)
 
@@ -650,17 +703,18 @@ def write_pan_clip(page_img, bboxes_pdf, page_w_pdf, page_h_pdf,
     sx = pw / page_w_pdf
     sy = ph / page_h_pdf
 
-    # Highlight bboxes in page-pixel coords, sorted top-to-bottom then left-to-right
-    pad_px = 6
-    hl_page = []
+    # Highlight bboxes in page-pixel coords. Each line is normalized to a
+    # canonical vertical extent so descenders/ascenders/superscripts can't make
+    # adjacent line outlines overlap unevenly.
+    raw = []
     for x0, y0, x1, y1 in bboxes_pdf:
-        hl_page.append((
-            int(x0 * sx) - pad_px,
-            int(y0 * sy) - pad_px,
-            int(x1 * sx) + pad_px,
-            int(y1 * sy) + pad_px,
+        raw.append((
+            int(x0 * sx),
+            int(y0 * sy),
+            int(x1 * sx),
+            int(y1 * sy),
         ))
-    hl_page.sort(key=lambda b: (b[1], b[0]))
+    hl_page = _normalize_line_heights(raw, pad_x=6)
 
     # Union bbox = camera target
     ux0 = min(b[0] for b in hl_page)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 — 2026-05-19
+
+Fixed: line-to-line highlight overlap was uneven when lines contained descenders (`g`, `p`, `;`), ascenders (`h`, `l`), or footnote superscripts. Each line is now normalized to a canonical vertical extent computed from the page's median word height and median line-to-line spacing, so every line of the highlight has the same height and adjacent outlines never touch. Horizontal padding (6px) is kept; vertical padding is replaced by the canonical line bound.
+
 ## 0.1.4 — 2026-05-19
 
 Improved: highlight reveal is now smooth and synced with narration. Previously each clip ran pan (no highlight, ~45% of clip) → word-by-word reveal (~25%) → hold. The reveal arrived seconds after narration started and popped in discrete word steps. Now the pan is a fixed ~1.1s and runs in parallel with a pixel-smooth left-to-right wipe; the highlight is fully visible right as the pan settles, and the rest of the clip is one long held frame with the full highlight on screen. The wipe still terminates word-aligned at the held end because the underlying bboxes are word-bridged, so paused frames at the hold position never cut a word.

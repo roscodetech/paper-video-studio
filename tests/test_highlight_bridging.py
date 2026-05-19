@@ -3,6 +3,7 @@ from paper_video import (
     _bridge_word_gaps,
     _ends_at_natural_boundary,
     _smart_extend_forward,
+    _normalize_line_heights,
 )
 
 
@@ -104,6 +105,57 @@ def test_smart_extend_does_not_extend_content_word_without_punct():
     ]
     new_end = _smart_extend_forward(words, end_idx=1, max_extra=2)
     assert new_end == 1
+
+
+def test_normalize_line_heights_gives_every_line_same_height():
+    # Three lines: line 1 has a tall ascender, line 2 has a descender, line 3 a superscript.
+    bboxes = [
+        (10, 100, 50, 120),   # line 1, "tall"
+        (52, 102, 90, 118),   # line 1, short word
+        (10, 130, 60, 152),   # line 2, descender (taller)
+        (10, 160, 40, 178),   # line 3, normal
+        (42, 158, 60, 170),   # line 3, superscript (shorter, higher)
+    ]
+    normalized = _normalize_line_heights(bboxes, pad_x=0)
+
+    # All bboxes on the same line should share y0/y1.
+    by_y0 = {}
+    for x0, y0, x1, y1 in normalized:
+        by_y0.setdefault(y0, set()).add(y1)
+    for y1s in by_y0.values():
+        assert len(y1s) == 1, "words on a single line should share y1"
+
+    # Every line should have the same height.
+    heights = {y1 - y0 for x0, y0, x1, y1 in normalized}
+    assert len(heights) == 1, f"every line should have the same height, got {heights}"
+
+
+def test_normalize_line_heights_prevents_adjacent_overlap():
+    # Line spacing is 30px; canonical half-height must be < 15px so lines don't touch.
+    bboxes = [
+        (10, 100, 50, 120),
+        (10, 130, 50, 152),  # descender
+        (10, 160, 50, 178),
+    ]
+    normalized = _normalize_line_heights(bboxes, pad_x=0)
+    # Sort by y to compare neighbours
+    sorted_bb = sorted(normalized, key=lambda b: b[1])
+    line_ys = []
+    for x0, y0, x1, y1 in sorted_bb:
+        if not line_ys or line_ys[-1][1] != y1:
+            line_ys.append((y0, y1))
+    # Adjacent lines must not overlap (line N y1 < line N+1 y0).
+    for i in range(len(line_ys) - 1):
+        assert line_ys[i][1] < line_ys[i + 1][0], (
+            f"line {i} y1={line_ys[i][1]} overlaps line {i+1} y0={line_ys[i+1][0]}")
+
+
+def test_normalize_line_heights_applies_horizontal_padding():
+    bboxes = [(100, 50, 200, 70)]
+    normalized = _normalize_line_heights(bboxes, pad_x=6)
+    assert len(normalized) == 1
+    x0, _, x1, _ = normalized[0]
+    assert x0 == 94 and x1 == 206
 
 
 def test_smart_extend_stops_at_paragraph_break():
