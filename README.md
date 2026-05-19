@@ -81,6 +81,14 @@ Tests:
 python -m pytest tests/ -v
 ```
 
+## Roadmap
+
+Known limitations and potential upgrades are tracked in [`ROADMAP.md`](./ROADMAP.md). Highlights:
+
+- **Font-size-aware line heights** — quotes that span multiple font sizes (body + heading) currently use a single canonical outline height. Fine for body-text quotes; worth revisiting if a heading-spanning quote ever needs it.
+- **`/paper-video --resume`** — pick up after a truth-checker halt without re-running earlier stages.
+- **9:16 render** — Reels/TikTok aspect ratio variant.
+
 ## License
 
 MIT — see `LICENSE`.

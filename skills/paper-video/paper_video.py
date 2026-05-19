@@ -636,7 +636,12 @@ def _normalize_line_heights(bboxes, pad_x: int = 6):
     ascenders like 'h', or superscripts won't deform the outline).
 
     Input bboxes are in page-pixel coords without padding. Output bboxes carry
-    `pad_x` of horizontal padding and a uniform vertical extent per line."""
+    `pad_x` of horizontal padding and a uniform vertical extent per line.
+
+    Note: this picks ONE canonical half-height for the entire quote. If a quote
+    ever spans multiple font sizes (e.g. body + heading), each line gets the
+    same outline height regardless of its native font size. See ROADMAP.md
+    'Font-size-aware line heights' for the fix shape if that ever bites."""
     if not bboxes:
         return list(bboxes)
 
