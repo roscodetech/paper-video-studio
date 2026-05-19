@@ -83,11 +83,13 @@ python -m pytest tests/ -v
 
 ## Roadmap
 
-Known limitations and potential upgrades are tracked in [`ROADMAP.md`](./ROADMAP.md). Highlights:
+Tracked in [`ROADMAP.md`](./ROADMAP.md). The next milestone (v0.2.0) is shaped around multi-platform distribution and brand consistency:
 
-- **Font-size-aware line heights** — quotes that span multiple font sizes (body + heading) currently use a single canonical outline height. Fine for body-text quotes; worth revisiting if a heading-spanning quote ever needs it.
-- **`/paper-video --resume`** — pick up after a truth-checker halt without re-running earlier stages.
-- **9:16 render** — Reels/TikTok aspect ratio variant.
+- **Logo on intro/outro** — PNG overlay on the title and end frames for agency/brand work.
+- **Aspect-ratio matrix** — render 16:9, 9:16, 1:1, and 4:5 from the same `points.json` for YouTube, Reels/TikTok/Shorts, Instagram feed, and Instagram tall.
+- **Richer title card** — surface source organization, date, document number, and authors below the title (vs. the bare title-only frame today).
+
+Other deferred items: `/paper-video --resume`, font-size-aware line heights, auto-thumbnails, multi-language narration, A/B hook testing.
 
 ## License
 
