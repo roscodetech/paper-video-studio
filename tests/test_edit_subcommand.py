@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-CLI = PLUGIN_ROOT / "skills" / "paper-video" / "paper_video.py"
+CLI = PLUGIN_ROOT / "skills" / "paper-cli" / "paper_video.py"
 
 
 def test_edit_subcommand_help_lists_work_flag():

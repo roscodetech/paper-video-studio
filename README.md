@@ -32,7 +32,7 @@ claude plugin add "file://C:/ROSCODE TECH/paper-video-studio"
 ## Prerequisites
 
 ```bash
-pip install -r skills/paper-video/requirements.txt
+pip install -r skills/paper-cli/requirements.txt
 ```
 
 You need `ffmpeg` and `ffprobe` on PATH for rendering.
@@ -53,7 +53,7 @@ Other accepted inputs:
 ## Standalone editor
 
 ```bash
-python skills/paper-video/paper_video.py edit --work <work_dir>
+python skills/paper-cli/paper_video.py edit --work <work_dir>
 ```
 
 Requires `<work_dir>/pages.json` (created by `fetch`).

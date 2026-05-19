@@ -1,6 +1,8 @@
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "roscodetech-plugins",
+  "version": "1.0.0",
+  "description": "ROSCODE TECH plugins for Claude Code.",
   "owner": {
     "name": "Roscoe Kerby",
     "email": "roscoe@roscodetech.com",
@@ -13,7 +15,8 @@
     {
       "name": "paper-video-studio",
       "source": "./",
-      "description": "Convert PubMed/PMC/PDF papers into fact-checked, narrated educational videos via a 5-agent pipeline (paper-curator, hook-writer, script-writer, truth-checker, flow-editor) and a Tkinter editor."
+      "description": "Convert PubMed/PMC/PDF papers into fact-checked, narrated educational videos via a 5-agent pipeline (paper-curator, hook-writer, script-writer, truth-checker, flow-editor) and a Tkinter editor.",
+      "category": "content-creation"
     }
   ]
 }

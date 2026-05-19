@@ -12,3 +12,6 @@ work_*/
 tmp_*/
 .DS_Store
 Thumbs.db
+
+# Local Claude Code settings (per-machine permissions)
+.claude/settings.local.json

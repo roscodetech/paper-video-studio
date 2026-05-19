@@ -6,7 +6,7 @@ argument-hint: <url|pmid|pmcid|pdf-path>
 
 You are the orchestrator for paper-video-studio. Drive the pipeline end-to-end.
 
-The plugin root contains `skills/paper-video/paper_video.py`. Resolve the absolute path to that file from `${CLAUDE_PLUGIN_ROOT}/skills/paper-video/paper_video.py`. If `CLAUDE_PLUGIN_ROOT` is not available in the environment, locate the plugin root by inspecting your installation (the directory containing `.claude-plugin/plugin.json` and `commands/paper-video.md`). For brevity, refer to the resolved path as `<cli>` below.
+The plugin root contains `skills/paper-cli/paper_video.py`. Resolve the absolute path to that file from `${CLAUDE_PLUGIN_ROOT}/skills/paper-cli/paper_video.py`. If `CLAUDE_PLUGIN_ROOT` is not available in the environment, locate the plugin root by inspecting your installation (the directory containing `.claude-plugin/plugin.json` and `commands/paper-video.md`). For brevity, refer to the resolved path as `<cli>` below.
 
 ## Step 1 — Fetch
 

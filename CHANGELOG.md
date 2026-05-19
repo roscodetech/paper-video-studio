@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.6 — 2026-05-19
+
+Marketplace-readiness cleanup:
+
+- Renamed `skills/paper-video/` → `skills/paper-cli/` and updated the SKILL's `name` field to `paper-cli`. Eliminates the name collision with `commands/paper-video.md` (both previously registered as a `paper-video` skill in the same plugin). The CLI skill is now scoped as the manual-mode escape hatch; the `/paper-video` slash command remains the default pipeline entrypoint.
+- Rewrote the CLI skill's description to make Claude only invoke it for partial operations (re-render existing work dir, fetch text without running the pipeline, launch the editor on a saved job).
+- Added `$schema`, `displayName`, and `repository` to `plugin.json` for marketplace discovery and editor autocomplete.
+- Added `version`, `description`, and `category` to `marketplace.json`.
+- Updated all internal path references (orchestrator command, tests, conftest, README) to the renamed skill directory.
+
 ## 0.1.5 — 2026-05-19
 
 Fixed: line-to-line highlight overlap was uneven when lines contained descenders (`g`, `p`, `;`), ascenders (`h`, `l`), or footnote superscripts. Each line is now normalized to a canonical vertical extent computed from the page's median word height and median line-to-line spacing, so every line of the highlight has the same height and adjacent outlines never touch. Horizontal padding (6px) is kept; vertical padding is replaced by the canonical line bound.

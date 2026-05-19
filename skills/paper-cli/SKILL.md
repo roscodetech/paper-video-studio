@@ -1,26 +1,29 @@
 ---
-name: paper-video
-description: Use when the user wants to turn a scientific paper into an annotated scrolling video — from a PubMed URL, PMID, PMCID, DOI/PDF URL, or local PDF. Renders a title card, smoothly pans/zooms to each key passage with a yellow highlight, and adds an optional voiceover. Triggers on phrases like "make a video of this paper", "video walkthrough of this study", "summarize this PubMed paper as a video", "narrate this paper", "highlight the key findings in a video".
+name: paper-cli
+description: Direct CLI access to the paper-video toolchain — fetch, render, and edit subcommands. Use ONLY for manual / partial operations on an existing work directory (re-render after editing points.json by hand, fetch text without running the agent pipeline, launch the Tkinter editor on a saved job, debug a specific render failure). For the default "turn a paper into a video" use case, use the `/paper-video-studio:paper-video` slash command which runs the full 5-agent pipeline. Triggers on phrases like "re-render this work dir", "open the editor on this output", "just fetch the paper text", "render with a different voice".
 ---
 
-# Paper Video
+# paper-cli — manual access to the paper-video CLI
 
-Turns a scientific paper into a 1080p MP4 that opens with a title card, then pans and zooms across each key passage with a highlighted box, optionally narrated by a natural-sounding voice (edge-tts).
+The full pipeline lives at the `/paper-video-studio:paper-video` slash command (curator → hook → script → truth-check → flow → render). This skill is the escape hatch for when you don't want to run the whole pipeline — for example, to re-render an existing work directory after a manual edit, to inspect what `fetch` produces, or to launch the editor on an old job.
+
+The CLI is `paper_video.py` next to this `SKILL.md`. Subcommands: `fetch`, `render`, `edit`.
 
 ## When to Use
 
-- "Make a video summary of this paper"
-- "Turn this PubMed study into a narrated video"
-- "Walk through the key findings of this paper as a video"
-- "Build a paper explainer video with a voiceover"
-- User pastes a PubMed/PMC URL, a PMID, a PMCID, or a path to a PDF and asks for a video
+- "Re-render this work directory" — call `render` directly
+- "Open the editor on `paper-video-output/<slug>`" — call `edit --work <dir>`
+- "Just fetch the PDF + text from this URL" — call `fetch` and stop
+- "Render with a different voice without re-running the agents" — call `render --voice-name <name>`
 
-**Not for:** producing a full educational animation, generating diagrams, or doing peer review. Highlights are quote-anchored — they only land if the quoted text actually exists in the PDF.
+## When NOT to use
+
+- "Make a video from this paper" → use the `/paper-video-studio:paper-video` orchestrator instead. It runs the full agent pipeline including truth-checking.
 
 ## Prerequisites (one-time)
 
 ```bash
-pip install -r "C:\Users\roscoe\.claude\skills\paper-video\requirements.txt"
+pip install -r "${CLAUDE_PLUGIN_ROOT}/skills/paper-cli/requirements.txt"
 ```
 
 `ffmpeg` and `ffprobe` must be on PATH (already present on this machine).
@@ -103,7 +106,7 @@ Tell the user the path. If they're on Windows and want to preview, `start "" <pa
 The skill ships with a Tkinter desktop editor for revising `points.json` after the agents finish. Launch:
 
 ```bash
-python "<plugin_path>/skills/paper-video/paper_video.py" edit --work <work_dir>
+python "${CLAUDE_PLUGIN_ROOT}/skills/paper-cli/paper_video.py" edit --work <work_dir>
 ```
 
 The editor supports:

@@ -1,6 +1,8 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "paper-video-studio",
-  "version": "0.1.5",
+  "displayName": "Paper Video Studio",
+  "version": "0.1.6",
   "description": "Convert PubMed/PMC/PDF papers into fact-checked, narrated educational videos via a 5-agent pipeline.",
   "author": {
     "name": "Roscoe Kerby",
@@ -8,6 +10,7 @@
     "url": "https://roscodetech.com"
   },
   "homepage": "https://github.com/roscodetech/paper-video-studio",
+  "repository": "https://github.com/roscodetech/paper-video-studio",
   "license": "MIT",
-  "keywords": ["video", "science", "pubmed", "education", "agents"]
+  "keywords": ["video", "science", "pubmed", "education", "agents", "paper", "research", "narration"]
 }
